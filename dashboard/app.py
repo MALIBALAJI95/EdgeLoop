@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sys
+import time
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -152,22 +153,32 @@ if nav == "System Overview & Champion":
 elif nav == "Live Inference & Ingestion":
     st.header("📸 Live Image Inference & Ingestion")
 
-    st.write("Upload an image or select a sample from research edge corruptions:")
+    st.write("Test inference using your live camera, file upload, or research sample:")
 
-    tab1, tab2 = st.tabs(["Upload New Image", "Select Corrupted Sample"])
+    tab_cam, tab_up, tab_sample = st.tabs(["📷 Live Camera Feed", "📁 Upload Image File", "🧪 Select Research Sample"])
 
     selected_img = None
     sample_name = "custom_image"
     condition = "unknown"
+    camera_file = None
+    uploaded_file = None
 
-    with tab1:
+    with tab_cam:
+        st.write("Point your webcam or phone camera at any waste item:")
+        camera_file = st.camera_input("Capture frame from camera")
+        if camera_file is not None:
+            selected_img = Image.open(camera_file).convert("RGB")
+            sample_name = f"camera_{int(time.time())}"
+            condition = "live_camera"
+
+    with tab_up:
         uploaded_file = st.file_uploader("Upload waste image (JPEG/PNG)", type=["jpg", "jpeg", "png"])
         if uploaded_file:
             selected_img = Image.open(uploaded_file).convert("RGB")
             sample_name = Path(uploaded_file.name).stem
             condition = "user_upload"
 
-    with tab2:
+    with tab_sample:
         sample_choice = st.selectbox(
             "Choose a sample test image:",
             [
@@ -179,7 +190,7 @@ elif nav == "Live Inference & Ingestion":
             ]
         )
         if sample_choice and Path(sample_choice).exists():
-            if not uploaded_file:
+            if not camera_file and not uploaded_file:
                 selected_img = Image.open(sample_choice).convert("RGB")
                 sample_name = Path(sample_choice).stem
                 condition = Path(sample_choice).parent.name
