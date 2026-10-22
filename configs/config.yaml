@@ -1,0 +1,62 @@
+project:
+  name: EdgeLoop
+  version: "1.0.0"
+  description: "Drift-Aware Edge-to-Cloud Machine Learning System for Waste Classification"
+
+model:
+  architecture: "mobilenet_v2"
+  num_classes: 6
+  input_size: [3, 224, 224]
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+  baseline_checkpoint: "research/edgeloop/mobilenetv2_baseline.pth"
+  champion_checkpoint: "artifacts/champion/mobilenetv2_champion.pth"
+
+paths:
+  research_dir: "research"
+  artifacts_dir: "artifacts"
+  champion_dir: "artifacts/champion"
+  candidates_dir: "artifacts/candidates"
+  registry_dir: "artifacts/registry"
+  database_path: "artifacts/registry/edgeloop.db"
+  incoming_data_dir: "data/incoming"
+  reviewed_data_dir: "data/reviewed"
+  class_mapping: "configs/class_mapping.json"
+
+drift:
+  features:
+    - brightness
+    - contrast
+    - edge_strength
+    - high_frequency_std
+    - high_frequency_mean_abs
+  ks_p_value_threshold: 0.01
+  window_size: 50
+  reference_sample_size: 500
+
+selection:
+  default_budget_records: 203
+  default_strategy: "unique_aware"
+  strategies:
+    - "random"
+    - "uncertainty"
+    - "unique_aware"
+    - "drift_aware"
+  uncertainty_metric: "entropy" # or margin / least_confidence
+
+governance:
+  baseline_accuracy: 0.913043
+  baseline_macro_f1: 0.894340
+  baseline_trash_f1: 0.765957
+  require_f1_improvement: true
+  min_macro_f1_improvement: 0.001
+  max_per_class_f1_drop: 0.02
+  enforce_explicit_approval: true
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  auth_token: "edgeloop-dev-secret-token"
+
+dashboard:
+  port: 8501

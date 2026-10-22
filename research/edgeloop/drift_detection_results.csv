@@ -1,0 +1,13 @@
+condition_for_evaluation,feature,ks_statistic,p_value,flagged_at_0.01
+clean,brightness,0.0,1.0,False
+clean,contrast,0.0,1.0,False
+clean,edge_strength,0.0,1.0,False
+blur,brightness,0.007905138339920948,1.0,False
+blur,contrast,0.041501976284584984,0.7766948092448882,False
+blur,edge_strength,0.3715415019762846,1.8125529363374813e-31,True
+low_light,brightness,1.0,1.8173219187463312e-303,True
+low_light,contrast,0.8873517786561265,1.7739771832955043e-209,True
+low_light,edge_strength,0.9367588932806324,6.16505879182899e-243,True
+noise,brightness,0.029644268774703556,0.9795158764276697,False
+noise,contrast,0.019762845849802372,0.9999713480841845,False
+noise,edge_strength,0.05928853754940711,0.3363613972671909,False

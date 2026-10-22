@@ -1,0 +1,27 @@
+{
+  "project": "EdgeLoop",
+  "version": "EdgeLoop_Kaggle_Research_v0.3",
+  "saved_at": "2026-10-21T20:47:35.572173",
+  "stage": "Kaggle research and experimentation",
+  "actual_system_implementation_started": false,
+  "baseline_holdout_accuracy": 0.913,
+  "baseline_holdout_macro_f1": 0.8943,
+  "drift_flag_rates": {
+    "clean": 0.057,
+    "blur": 0.065,
+    "low_light": 1.0,
+    "noise": 0.034
+  },
+  "limitations": [
+    "Blur and noise detection need improvement.",
+    "Clean false-alarm rate needs independent evaluation.",
+    "The final retraining experiments are not yet confirmed complete."
+  ],
+  "latest_experiment": {
+    "name": "Unique-image-aware uncertainty selection",
+    "budget_records": 203,
+    "unique_source_images_selected": 203,
+    "errors_captured": 102,
+    "output_file": "selection_results_v2.csv"
+  }
+}

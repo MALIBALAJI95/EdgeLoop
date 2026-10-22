@@ -1,0 +1,3 @@
+candidate,best_epoch,val_accuracy,val_macro_f1
+uncertainty,1,0.9206349206349206,0.9053019280878533
+unique_aware,1,0.9206349206349206,0.9005645972002753

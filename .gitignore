@@ -1,0 +1,71 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Pytest & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Environment Variables
+.env
+
+# Large archives and binaries
+*.zip
+*.pth
+*.pt
+research/edgeloop/corrupted_edge/
+artifacts/champion/*
+!artifacts/champion/.gitkeep
+
+# SQLite databases
+*.db
+*.sqlite3
+
+# Streamlit local state
+.streamlit/
+
+# Transient incoming images (keep directory)
+data/incoming/*
+!data/incoming/.gitkeep
+!data/incoming/README.md
+
+# Checkpoints generated at runtime (keep directories and initial champion)
+artifacts/candidates/*
+!artifacts/candidates/.gitkeep

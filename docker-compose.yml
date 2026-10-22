@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: edgeloop-api
+    ports:
+      - "8000:8000"
+    environment:
+      - EDGELOOP_HOST=0.0.0.0
+      - EDGELOOP_PORT=8000
+      - EDGELOOP_DEVICE=cpu
+      - EDGELOOP_DEV_MODE=true
+      - EDGELOOP_API_TOKEN=edgeloop-dev-secret-token
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: edgeloop-dashboard
+    command: ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "8501:8501"
+    environment:
+      - EDGELOOP_DEVICE=cpu
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./data:/app/data
+    depends_on:
+      - api
+    restart: unless-stopped

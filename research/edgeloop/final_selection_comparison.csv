@@ -1,0 +1,5 @@
+strategy,records,unique_images,errors,error_rate,unique_error_images
+random_selected,203,173,46,0.2266,43
+uncertainty_selected,203,134,120,0.5911,89
+unique_aware_selected,203,203,102,0.5025,102
+balanced_selected,203,126,115,0.5665,86
