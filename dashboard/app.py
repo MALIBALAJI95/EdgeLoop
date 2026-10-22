@@ -153,76 +153,106 @@ if nav == "System Overview & Champion":
 elif nav == "Live Inference & Ingestion":
     st.header("📸 Live Image Inference & Ingestion")
 
-    st.write("Test inference using your live camera, file upload, or research sample:")
+    st.markdown("""
+    Test edge inference on any waste item. Note that EdgeLoop classifies into the **6 TrashNet recycling categories**:
+    `paper` (books, pages, magazines), `cardboard`, `glass`, `metal`, `plastic`, and `trash` (general non-recyclables).
+    """)
 
-    tab_cam, tab_up, tab_sample = st.tabs(["📷 Live Camera Feed", "📁 Upload Image File", "🧪 Select Research Sample"])
+    tab_cam, tab_up, tab_sample = st.tabs(["📷 Live Camera Capture", "📁 Upload Image File", "🧪 Select Research Sample"])
 
-    selected_img = None
-    sample_name = "custom_image"
-    condition = "unknown"
-    camera_file = None
-    uploaded_file = None
+    def display_inference_result(img: Image.Image, sample_id: str, condition: str):
+        """Helper to run inference and display telemetry immediately."""
+        engine = InferenceEngine(log_predictions=True)
+        res = engine.predict_image(img, sample_id=sample_id, condition=condition)
+
+        # Drift features
+        feats = extractor.extract_from_image(img)
+        is_drift, triggered = detector.check_sample(feats, log_to_db=True)
+
+        col_img, col_res = st.columns([1, 1.5])
+        with col_img:
+            st.image(img, caption=f"Analyzed Frame: {sample_id} ({condition})", use_container_width=True)
+
+        with col_res:
+            st.success(f"### Classification: `{res.predicted_class.upper()}` (Confidence: {res.confidence * 100:.1f}%)")
+
+            # Recycling & category context
+            if res.predicted_class in ["paper", "cardboard"]:
+                st.info("📚 **Category Context**: Books, notebooks, and cardboard covers are classified as **`PAPER`** or **`CARDBOARD`** for recycling.")
+            elif res.predicted_class == "plastic":
+                st.info("🧴 **Category Context**: Plastic containers, covers, bottles, or packaging.")
+            elif res.predicted_class == "metal":
+                st.info("🥫 **Category Context**: Aluminum cans, tin foil, or metal lids.")
+            elif res.predicted_class == "glass":
+                st.info("🍾 **Category Context**: Glass bottles, jars, or glassware.")
+            elif res.predicted_class == "trash":
+                st.info("🗑️ **Category Context**: General non-recyclable solid refuse.")
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Uncertainty (Entropy)", f"{res.entropy:.4f}")
+            m2.metric("Inference Latency", f"{res.inference_time_ms:.1f} ms")
+            m3.metric("Sensor Drift", "⚠️ DRIFT ALERT" if is_drift else "✅ Clean")
+
+            if is_drift:
+                st.warning(f"Drift triggered on: {', '.join(triggered)}")
+
+            # Probabilities chart
+            st.write("##### Class Probability Distribution")
+            prob_df = pd.DataFrame(list(res.class_probabilities.items()), columns=["Category", "Probability"])
+            st.bar_chart(prob_df.set_index("Category"))
+
+            # One-click add to Human Review Queue
+            if st.button("📥 Send to Human Review Queue", key=f"queue_{sample_id}"):
+                with db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id FROM inferences WHERE sample_id = ? ORDER BY id DESC LIMIT 1", (sample_id,))
+                    row = cursor.fetchone()
+                    if row:
+                        inf_id = row["id"]
+                        db.add_to_selection_queue(
+                            inference_id=inf_id,
+                            sample_id=sample_id,
+                            image_path=f"camera_capture_{sample_id}",
+                            strategy="manual_operator_selection",
+                            upload_reason="operator_flagged_for_audit",
+                            entropy=res.entropy
+                        )
+                        st.success(f"Sample {sample_id} added to the Review Queue! Check the 'Human Review Queue' tab.")
 
     with tab_cam:
-        st.write("Point your webcam or phone camera at any waste item:")
-        camera_file = st.camera_input("Capture frame from camera")
+        st.write("Point your webcam or phone camera at an object. **Inference runs automatically upon capture:**")
+        camera_file = st.camera_input("Capture frame from camera", key="webcam_capture")
         if camera_file is not None:
-            selected_img = Image.open(camera_file).convert("RGB")
-            sample_name = f"camera_{int(time.time())}"
-            condition = "live_camera"
+            cam_img = Image.open(camera_file).convert("RGB")
+            sample_id = f"camera_{int(time.time())}"
+            display_inference_result(cam_img, sample_id=sample_id, condition="live_camera")
+
+        st.caption("💡 For continuous 30 FPS video streaming with a live HUD overlay, run in terminal: `.venv/bin/python scripts/live_camera.py`")
 
     with tab_up:
-        uploaded_file = st.file_uploader("Upload waste image (JPEG/PNG)", type=["jpg", "jpeg", "png"])
-        if uploaded_file:
-            selected_img = Image.open(uploaded_file).convert("RGB")
-            sample_name = Path(uploaded_file.name).stem
-            condition = "user_upload"
+        uploaded_file = st.file_uploader("Upload an image file (JPEG/PNG)", type=["jpg", "jpeg", "png"], key="file_upload")
+        if uploaded_file is not None:
+            up_img = Image.open(uploaded_file).convert("RGB")
+            sample_id = Path(uploaded_file.name).stem
+            display_inference_result(up_img, sample_id=sample_id, condition="user_upload")
 
     with tab_sample:
         sample_choice = st.selectbox(
-            "Choose a sample test image:",
+            "Choose a pre-packaged research sample:",
             [
                 "research/edgeloop/corrupted_edge/blur/glass_glass1.jpg",
                 "research/edgeloop/corrupted_edge/low_light/glass_glass1.jpg",
                 "research/edgeloop/corrupted_edge/noise/glass_glass1.jpg",
                 "research/edgeloop/corrupted_edge/blur/metal_metal29.jpg",
                 "research/edgeloop/corrupted_edge/low_light/paper_paper71.jpg"
-            ]
+            ],
+            key="sample_select"
         )
         if sample_choice and Path(sample_choice).exists():
-            if not camera_file and not uploaded_file:
-                selected_img = Image.open(sample_choice).convert("RGB")
-                sample_name = Path(sample_choice).stem
-                condition = Path(sample_choice).parent.name
-
-    if selected_img:
-        col_img, col_res = st.columns([1, 2])
-        with col_img:
-            st.image(selected_img, caption=f"Input: {sample_name} ({condition})", use_container_width=True)
-
-        with col_res:
-            if st.button("Run Edge Inference", type="primary"):
-                engine = InferenceEngine(log_predictions=True)
-                res = engine.predict_image(selected_img, sample_id=sample_name, condition=condition)
-
-                # Drift features
-                feats = extractor.extract_from_image(selected_img)
-                is_drift, triggered = detector.check_sample(feats, log_to_db=True)
-
-                st.success(f"**Prediction**: `{res.predicted_class.upper()}` (Confidence: {res.confidence * 100:.2f}%)")
-
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Uncertainty (Entropy)", f"{res.entropy:.4f}")
-                m2.metric("Latency", f"{res.inference_time_ms:.1f} ms")
-                m3.metric("Drift Alert", "⚠️ DRIFT" if is_drift else "✅ Clean")
-
-                if is_drift:
-                    st.warning(f"Drift triggered on: {', '.join(triggered)}")
-
-                # Probabilities chart
-                st.write("##### Class Probabilities")
-                prob_df = pd.DataFrame(list(res.class_probabilities.items()), columns=["Class", "Probability"])
-                st.bar_chart(prob_df.set_index("Class"))
+            samp_img = Image.open(sample_choice).convert("RGB")
+            sample_id = Path(sample_choice).stem
+            condition = Path(sample_choice).parent.name
+            display_inference_result(samp_img, sample_id=sample_id, condition=condition)
 
     st.markdown("---")
     st.subheader("Recent Inferences Feed")
