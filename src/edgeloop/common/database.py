@@ -329,6 +329,44 @@ class Database:
             )
             return cursor.lastrowid
 
+    def get_category_counts(self) -> Dict[str, int]:
+        """Aggregate total detected count per waste category."""
+        counts = {"cardboard": 0, "glass": 0, "metal": 0, "paper": 0, "plastic": 0, "trash": 0}
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT predicted_class, COUNT(*) as cnt FROM inferences GROUP BY predicted_class")
+            for row in cursor.fetchall():
+                cls = row["predicted_class"]
+                if cls in counts:
+                    counts[cls] = row["cnt"]
+                else:
+                    counts[cls] = row["cnt"]
+        return counts
+
+    def get_recent_detections(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Fetch recent inference detection records for live feed."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, sample_id, image_path, predicted_class, confidence,
+                       entropy, latency_ms, condition, created_at
+                FROM inferences
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,)
+            )
+            return [dict(r) for r in cursor.fetchall()]
+
+    def get_verified_review_count(self) -> int:
+        """Count total human-verified reviews."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as cnt FROM review_records")
+            row = cursor.fetchone()
+            return row["cnt"] if row else 0
+
 
 # Global database accessor
 _db_instance: Optional[Database] = None
