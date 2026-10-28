@@ -52,13 +52,23 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0 sqlite3
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -e .
 
       - name: Verify Champion Model Integrity
+        env:
+          EDGELOOP_CONFIG_PATH: configs/config.yaml
+          PYTHONPATH: src
         run: |
           python -c "from edgeloop.registry.manager import ModelRegistry; reg = ModelRegistry(); champ = reg.get_champion(); assert champ is not None; print(f'Champion verified: {champ.version}')"
 
@@ -74,17 +84,34 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1 libglib2.0-0 sqlite3
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -e .
 
       - name: Launch API Service & Health Check
+        env:
+          EDGELOOP_CONFIG_PATH: configs/config.yaml
+          PYTHONPATH: src
         run: |
           python -m uvicorn edgeloop.api.app:app --host 127.0.0.1 --port 8000 &
           API_PID=$!
-          sleep 5
+          echo "Waiting for API service to initialize..."
+          for i in {1..20}; do
+            if curl -sf http://127.0.0.1:8000/health; then
+              echo "API is healthy!"
+              break
+            fi
+            sleep 2
+          done
           curl -f http://127.0.0.1:8000/health || (echo "Health check failed" && kill $API_PID && exit 1)
           kill $API_PID
           echo "EdgeLoop Service Build & Deployment Verification Succeeded."
