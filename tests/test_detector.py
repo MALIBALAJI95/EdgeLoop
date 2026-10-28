@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 
 from edgeloop.inference.detector import WasteObjectDetector, DetectionFrameResult, BIN_MAPPINGS
+from edgeloop.inference.tracker import StreamObjectTracker
 
 
 @pytest.fixture(scope="module")
@@ -51,3 +52,24 @@ def test_bin_mapping_consistency():
         assert "color_rgb" in BIN_MAPPINGS[c]
         assert "color_bgr" in BIN_MAPPINGS[c]
         assert "guidance" in BIN_MAPPINGS[c]
+
+
+def test_tracker_deduplication(detector, sample_image):
+    tracker = StreamObjectTracker(iou_threshold=0.35, min_hits_to_confirm=2)
+    res = detector.detect_and_classify(sample_image)
+
+    # Frame 1
+    active1 = tracker.update(res.objects, full_image=sample_image)
+    assert len(active1) == len(res.objects)
+    track_ids_1 = [t.track_id for t in active1]
+
+    # Frame 2 with same detections (simulating next video frame)
+    active2 = tracker.update(res.objects, full_image=sample_image)
+    track_ids_2 = [t.track_id for t in active2]
+
+    # Must match same track IDs without creating duplicates
+    assert track_ids_1 == track_ids_2
+
+    # Session unique objects must count only once
+    unique_objs = tracker.get_session_unique_objects()
+    assert len(unique_objs) == len(res.objects)

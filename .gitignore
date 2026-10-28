@@ -61,10 +61,13 @@ artifacts/champion/*
 # Streamlit local state
 .streamlit/
 
-# Transient incoming images (keep directory)
+# Transient incoming and reviewed images (keep directory)
+data/*.jpg
 data/incoming/*
 !data/incoming/.gitkeep
 !data/incoming/README.md
+data/reviewed/*
+!data/reviewed/.gitkeep
 
 # Checkpoints generated at runtime (keep directories and initial champion)
 artifacts/candidates/*

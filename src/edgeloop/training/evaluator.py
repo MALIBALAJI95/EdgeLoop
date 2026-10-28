@@ -67,7 +67,8 @@ class ModelEvaluator:
         checkpoint_path: Union[str, Path],
         eval_manifest_or_df: Union[str, Path, pd.DataFrame],
         model_version: Optional[str] = None,
-        device: str = "cpu"
+        device: str = "cpu",
+        max_samples: Optional[int] = None
     ) -> EvaluationReport:
         """Run evaluation over a dataset and compute accuracy, macro-F1, per-class F1, and confusion matrix."""
         ckpt_p = Path(checkpoint_path)
@@ -83,10 +84,27 @@ class ModelEvaluator:
             df = pd.read_csv(manifest_path)
         else:
             dataset_name = "in_memory_dataframe"
-            df = eval_manifest_or_df
+            df = eval_manifest_or_df.copy()
 
         if "label" not in df.columns:
             raise ValueError("Evaluation dataset must contain a 'label' column.")
+
+        # If split column exists, prefer clean_holdout if images exist on disk; otherwise use edge_stream
+        if "split" in df.columns:
+            has_clean = (df["split"] == "clean_holdout").any()
+            if has_clean:
+                clean_df = df[df["split"] == "clean_holdout"].copy()
+                # Test whether clean_holdout image files exist
+                first_sid = clean_df.iloc[0].get("sample_id", "")
+                if list((Path(self.config.root_dir) / "research" / "edgeloop").glob(f"**/{first_sid}.jpg")):
+                    df = clean_df
+                elif (df["split"] == "edge_stream").any():
+                    df = df[df["split"] == "edge_stream"].copy()
+            elif (df["split"] == "edge_stream").any():
+                df = df[df["split"] == "edge_stream"].copy()
+
+        if max_samples is not None and len(df) > max_samples:
+            df = df.sample(n=max_samples, random_state=42).copy()
 
         # Find image path column
         path_col = None
@@ -106,20 +124,27 @@ class ModelEvaluator:
         for _, row in df.iterrows():
             img_p_str = row[path_col]
             img_p = Path(img_p_str)
+            sid = row.get("sample_id", "")
 
-            # If path from kaggle archive is relative or not found, try to locate in research/edgeloop/corrupted_edge
+            # If path from kaggle archive is relative or not found, locate in research/edgeloop
             if not img_p.exists():
-                # Check research corrupted_edge
-                fname = img_p.name
-                cond = row.get("condition", "")
-                alt_p = Path(self.config.root_dir) / "research" / "edgeloop" / "corrupted_edge" / cond / fname
-                if alt_p.exists():
-                    img_p = alt_p
-                else:
-                    # Search anywhere in research/edgeloop
-                    matches = list((Path(self.config.root_dir) / "research" / "edgeloop").glob(f"**/{fname}"))
+                # 1. Search by sample_id in research/edgeloop
+                if sid:
+                    matches = list((Path(self.config.root_dir) / "research" / "edgeloop").glob(f"**/{sid}.jpg"))
                     if matches:
                         img_p = matches[0]
+
+                # 2. Check research corrupted_edge with condition
+                if not img_p.exists():
+                    fname = img_p.name
+                    cond = row.get("condition", "")
+                    alt_p = Path(self.config.root_dir) / "research" / "edgeloop" / "corrupted_edge" / cond / fname
+                    if alt_p.exists():
+                        img_p = alt_p
+                    else:
+                        matches = list((Path(self.config.root_dir) / "research" / "edgeloop").glob(f"**/{fname}"))
+                        if matches:
+                            img_p = matches[0]
 
             if not img_p.exists():
                 continue

@@ -104,11 +104,16 @@ class CandidateTrainer:
         Split dataset into train and validation sets by unique `sample_id` groups.
         This guarantees zero data leakage of identical physical source objects.
         """
-        unique_samples = df["sample_id"].unique()
+        unique_samples = list(df["sample_id"].unique())
         rng = np.random.default_rng(self.seed)
         rng.shuffle(unique_samples)
 
         val_count = int(round(len(unique_samples) * val_fraction))
+        if val_count == 0 and len(unique_samples) >= 2:
+            val_count = 1
+        elif val_count >= len(unique_samples) and len(unique_samples) > 1:
+            val_count = len(unique_samples) - 1
+
         val_samples = set(unique_samples[:val_count])
         train_samples = set(unique_samples[val_count:])
 

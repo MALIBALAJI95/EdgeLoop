@@ -167,7 +167,8 @@ class ModelRegistry:
     def evaluate_candidate(
         self,
         candidate_version: str,
-        eval_manifest_path: Union[str, Path]
+        eval_manifest_path: Union[str, Path],
+        max_samples: Optional[int] = None
     ) -> ComparisonReport:
         """
         Evaluate candidate and compare against active champion.
@@ -185,14 +186,16 @@ class ModelRegistry:
         candidate_eval = self.evaluator.evaluate_checkpoint(
             checkpoint_path=candidate_row["checkpoint_path"],
             eval_manifest_or_df=eval_manifest_path,
-            model_version=candidate_version
+            model_version=candidate_version,
+            max_samples=max_samples
         )
 
         # Run champion evaluation on identical dataset
         champion_eval = self.evaluator.evaluate_checkpoint(
             checkpoint_path=champion.checkpoint_path,
             eval_manifest_or_df=eval_manifest_path,
-            model_version=champion.version
+            model_version=champion.version,
+            max_samples=max_samples
         )
 
         # Compare metrics
