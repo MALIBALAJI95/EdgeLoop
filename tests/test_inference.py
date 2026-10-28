@@ -17,10 +17,17 @@ from edgeloop.inference.engine import (
 
 @pytest.fixture(scope="module")
 def valid_image_path():
-    path = Path("research/edgeloop/corrupted_edge/blur/glass_glass1.jpg")
-    if not path.exists():
-        pytest.skip("Test image not found in research artifacts")
-    return path
+    for candidate in [
+        Path("tests/fixtures/sample_waste.jpg"),
+        Path("research/edgeloop/corrupted_edge/blur/glass_glass1.jpg"),
+    ]:
+        if candidate.exists():
+            return candidate
+    # Fallback
+    fallback = Path("tests/fixtures/sample_waste.jpg")
+    fallback.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (224, 224), (120, 150, 180)).save(fallback)
+    return fallback
 
 
 @pytest.fixture(scope="module")

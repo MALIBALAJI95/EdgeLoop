@@ -16,10 +16,14 @@ def detector():
 
 @pytest.fixture(scope="module")
 def sample_image():
-    p = Path("research/edgeloop/corrupted_edge/blur/glass_glass1.jpg")
-    if not p.exists():
-        pytest.skip("Test image not found")
-    return Image.open(p).convert("RGB")
+    for candidate in [
+        Path("tests/fixtures/sample_waste.jpg"),
+        Path("research/edgeloop/corrupted_edge/blur/glass_glass1.jpg"),
+    ]:
+        if candidate.exists():
+            return Image.open(candidate).convert("RGB")
+    # Synthetic fallback
+    return Image.new("RGB", (224, 224), (120, 150, 180))
 
 
 def test_detector_inference(detector, sample_image):
