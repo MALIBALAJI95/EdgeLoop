@@ -17,6 +17,16 @@ def client(tmp_path_factory):
     import edgeloop.common.database as db_mod
     db_mod._db_instance = test_db
 
+    test_db.log_inference(
+        sample_id="history-seed",
+        image_path="tests/fixtures/history-seed.jpg",
+        predicted_class="glass",
+        confidence=0.99,
+        entropy=0.01,
+        latency_ms=10.0,
+        model_version="test_model"
+    )
+
     # Create dummy champion file if not exists
     champ_p = Path("artifacts/champion/mobilenetv2_champion.pth")
     champ_p.parent.mkdir(parents=True, exist_ok=True)
