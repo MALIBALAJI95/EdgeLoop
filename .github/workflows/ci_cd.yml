@@ -31,10 +31,12 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pytest pytest-cov httpx
+          pip install -e .
 
       - name: Run Test Suite
         env:
           EDGELOOP_CONFIG_PATH: configs/config.yaml
+          PYTHONPATH: src
         run: |
           pytest tests/ -v --durations=10
 

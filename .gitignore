@@ -46,13 +46,16 @@ htmlcov/
 # Local Environment Variables
 .env
 
-# Large archives and binaries
+# Large archives and binaries (allow champion baseline weights)
 *.zip
 *.pth
 *.pt
+!research/edgeloop/mobilenetv2_baseline.pth
+!artifacts/champion/mobilenetv2_champion.pth
 research/edgeloop/corrupted_edge/
 artifacts/champion/*
 !artifacts/champion/.gitkeep
+!artifacts/champion/mobilenetv2_champion.pth
 
 # SQLite databases
 *.db
