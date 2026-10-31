@@ -965,7 +965,7 @@ elif selected_tab == "🚀 Deployment & Monitoring":
         - **Latest Commit**: `{git_commit}` — *{git_msg}*
         - **Workflow Configuration**: [`.github/workflows/ci_cd.yml`](file://{root_dir}/.github/workflows/ci_cd.yml)
         - **Automated Lifecycle**:
-          1. `test_and_lint`: Pytest suite (41 unit & integration tests)
+          1. `test_and_lint`: Pytest suite (45 unit & integration tests)
           2. `governance_verification`: Champion model integrity & regression tests
           3. `build_and_deploy_check`: Service build & readiness verification
         - **Secrets Governance**: Zero tokens or private environment variables exposed.
