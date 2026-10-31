@@ -29,6 +29,14 @@ sys.path.insert(0, str(root_dir / "src"))
 
 from edgeloop.common.config import get_config
 from edgeloop.common.database import get_db
+from edgeloop.common.classes import (
+    get_registered_classes,
+    get_class_names,
+    get_bin_mapping,
+    get_bin_mappings,
+    register_new_class,
+    normalize_class_name
+)
 from edgeloop.drift.detector import DriftDetector
 from edgeloop.drift.features import DriftFeatureExtractor
 from edgeloop.inference.detector import WasteObjectDetector, DetectionFrameResult, DetectedWasteObject, BIN_MAPPINGS
@@ -426,23 +434,94 @@ if selected_tab == "🎯 Live Sorting":
                             st.info(f"Item #{obj.track_id}")
 
                     with r_c2:
+                        is_unc = getattr(obj, "is_uncertain", False) or obj.waste_confidence < 0.65 or obj.entropy > 0.80
                         st.markdown(f"**Item #{obj.track_id}:** `{obj.detector_label.upper()}`")
-                        st.markdown(f"<span class='badge badge-uncertain'>AI Prediction: {obj.waste_class.upper()}</span>", unsafe_allow_html=True)
-                        st.write(f"- Confidence: `{obj.waste_confidence * 100:.1f}%`")
-                        st.write(f"- Uncertainty: `{obj.entropy:.3f}`")
+                        if is_unc:
+                            st.markdown("<span style='background-color: #d29922; color: #000; font-weight: 700; padding: 4px 8px; border-radius: 4px; display: inline-block; margin-bottom: 6px;'>⚠️ Unknown / Uncertain — Needs Human Review</span>", unsafe_allow_html=True)
+                            st.markdown(f"<div style='font-size: 12px; color: #8b949e;'>Model Best Guess: <code>{obj.waste_class.upper()}</code> ({obj.waste_confidence * 100:.1f}%)</div>", unsafe_allow_html=True)
+                        else:
+                            bin_info = get_bin_mapping(obj.waste_class)
+                            disp = bin_info.get("display_name", obj.waste_class.title())
+                            st.markdown(f"<span class='badge badge-confirmed'>AI Prediction: {disp.upper()}</span>", unsafe_allow_html=True)
+                            st.write(f"- Confidence: `{obj.waste_confidence * 100:.1f}%`")
+
+                        st.write(f"- Uncertainty Entropy: `{obj.entropy:.3f}`")
                         st.write(f"- Suggested Bin: *{obj.suggested_bin.split(' (')[0]}*")
 
                     with r_c3:
-                        classes = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
-                        default_idx = classes.index(obj.waste_class) if obj.waste_class in classes else 0
-                        chosen_label = st.selectbox(f"Verified Label", classes, index=default_idx, key=f"rev_lbl_{obj.track_id}")
-                        action = st.radio("Decision", ["✅ Confirm as Ground Truth", "❌ Reject (Drop)"], key=f"act_{obj.track_id}", horizontal=True)
+                        action_mode = st.radio(
+                            "Human Action",
+                            [
+                                "✅ Confirm Existing Class",
+                                "✏️ Correct to Another Class",
+                                "✨ Create New Dynamic Class",
+                                "❌ Reject Unusable Image"
+                            ],
+                            key=f"act_mode_{obj.track_id}",
+                            index=2 if is_unc else 0
+                        )
+
+                        chosen_label = None
+                        new_class_payload = None
+
+                        if action_mode == "✅ Confirm Existing Class":
+                            chosen_label = obj.waste_class
+                            bin_info = get_bin_mapping(chosen_label)
+                            st.caption(f"Will commit as **{bin_info.get('display_name', chosen_label.title())}** ({bin_info['bin_name']})")
+
+                        elif action_mode == "✏️ Correct to Another Class":
+                            reg_classes = get_class_names()
+                            default_idx = reg_classes.index(obj.waste_class) if obj.waste_class in reg_classes else 0
+                            chosen_label = st.selectbox("Select Correct Class", reg_classes, index=default_idx, key=f"corr_cls_{obj.track_id}")
+                            bin_info = get_bin_mapping(chosen_label)
+                            st.caption(f"Bin: **{bin_info['bin_name']}**")
+
+                        elif action_mode == "✨ Create New Dynamic Class":
+                            st.markdown("<div style='background-color:#161b22; padding:10px; border-radius:6px; border:1px solid #30363d; margin-top:4px;'>", unsafe_allow_html=True)
+                            new_name = st.text_input("New Object Name", placeholder="e.g. Juice Carton", key=f"n_name_{obj.track_id}")
+                            nc_c1, nc_c2 = st.columns(2)
+                            with nc_c1:
+                                new_cat = st.selectbox(
+                                    "Waste Category",
+                                    ["Composite / Carton", "Rigid Packaging", "Special Recyclable", "E-Waste / Battery", "General Refuse"],
+                                    key=f"n_cat_{obj.track_id}"
+                                )
+                            with nc_c2:
+                                new_bin = st.selectbox(
+                                    "Recommended Bin",
+                                    [
+                                        "Yellow Bin (Plastics & Cartons)",
+                                        "Blue Bin (Paper & Books)",
+                                        "Green Bin (Glass)",
+                                        "Grey Bin (Metals)",
+                                        "Brown Bin (Organics)",
+                                        "Black Bin (General Refuse)"
+                                    ],
+                                    key=f"n_bin_{obj.track_id}"
+                                )
+                            new_guidance = st.text_input("Recycling Guidance", value="Rinse, drain liquid, and flatten before disposal.", key=f"n_guide_{obj.track_id}")
+                            st.markdown("</div>", unsafe_allow_html=True)
+
+                            if new_name.strip():
+                                chosen_label = normalize_class_name(new_name)
+                                new_class_payload = {
+                                    "display_name": new_name.strip(),
+                                    "category": new_cat,
+                                    "bin_name": new_bin,
+                                    "bin_guidance": new_guidance
+                                }
+                                st.success(f"Configured dynamic class: `{chosen_label}` ({new_name.strip()}) ➔ {new_bin}")
+
+                        elif action_mode == "❌ Reject Unusable Image":
+                            st.caption("Item will be dropped and excluded from ground truth dataset.")
 
                         review_decisions[obj.track_id] = {
                             "object": obj,
+                            "action": action_mode,
                             "true_label": chosen_label,
-                            "is_confirmed": (action == "✅ Confirm as Ground Truth"),
-                            "notes": f"Verified as {chosen_label}" if chosen_label == obj.waste_class else f"Corrected from {obj.waste_class} to {chosen_label}"
+                            "new_class_payload": new_class_payload,
+                            "is_confirmed": (action_mode != "❌ Reject Unusable Image") and bool(chosen_label),
+                            "notes": f"Verified via {action_mode} as {chosen_label}" if chosen_label else "Rejected unusable image"
                         }
                     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -451,24 +530,58 @@ if selected_tab == "🎯 Live Sorting":
                 if st.button("💾 Commit Verified Labels & Proceed to Learning", type="primary", use_container_width=True):
                     save_dir = Path("data/reviewed")
                     save_dir.mkdir(parents=True, exist_ok=True)
+                    committed_classes = []
                     for tid, dec in review_decisions.items():
                         o: TrackedWasteObject = dec["object"]
                         if dec["is_confirmed"]:
-                            sample_id = f"verified_t{o.track_id}_{int(time.time())}"
+                            # Register dynamic class if new
+                            if dec["new_class_payload"]:
+                                p = dec["new_class_payload"]
+                                register_new_class(
+                                    display_name=p["display_name"],
+                                    category=p["category"],
+                                    bin_name=p["bin_name"],
+                                    bin_guidance=p["bin_guidance"]
+                                )
+                                committed_classes.append(p["display_name"])
+
+                            lbl = dec["true_label"]
+                            sample_id = f"verified_{lbl}_t{o.track_id}_{int(time.time())}"
                             img_path = save_dir / f"{sample_id}.jpg"
                             if o.crop_image is not None:
                                 o.crop_image.save(img_path)
                             else:
                                 Image.new("RGB", (224, 224), (128, 128, 128)).save(img_path)
 
-                            inf_id = db.log_inference(sample_id, str(img_path.resolve()), o.waste_class, o.waste_confidence, o.entropy, 40.0, champ_ver, "session_audit", uploaded=1)
-                            q_id = db.add_to_selection_queue(inf_id, sample_id, str(img_path.resolve()), "human_verified", "operator_audit", o.entropy)
-                            db.submit_review(q_id, inf_id, sample_id, str(img_path.resolve()), o.waste_class, dec["true_label"], "operator", dec["notes"])
+                            inf_id = db.log_inference(
+                                sample_id,
+                                str(img_path.resolve()),
+                                o.waste_class,
+                                o.waste_confidence,
+                                o.entropy,
+                                40.0,
+                                champ_ver,
+                                "dynamic_class_review" if dec["new_class_payload"] else "session_audit",
+                                uploaded=1
+                            )
+                            q_id = db.add_to_selection_queue(
+                                inf_id,
+                                sample_id,
+                                str(img_path.resolve()),
+                                "human_verified",
+                                "dynamic_class_addition" if dec["new_class_payload"] else "operator_audit",
+                                o.entropy
+                            )
+                            db.submit_review(q_id, inf_id, sample_id, str(img_path.resolve()), o.waste_class, lbl, "operator", dec["notes"])
 
                     st.session_state.session_unique_objects = []
                     st.session_state.session_tracker.reset_session()
                     st.session_state.session_phase = "LIVE"
-                    st.success("Human verification saved to Ground Truth Store! Open 'Continuous Learning' to train candidate models.")
+                    msg = "Human verification saved to Ground Truth Store!"
+                    if committed_classes:
+                        msg += f" Registered new class: {', '.join(committed_classes)}."
+                    msg += " Open 'Continuous Learning' to train candidate models."
+                    st.success(msg)
                     st.rerun()
 
             with b_c2:
@@ -635,6 +748,22 @@ elif selected_tab == "🔄 Continuous Learning":
         """)
 
     st.markdown("---")
+    st.subheader("🏷️ Active Registered Classes (Baseline + Human-Supervised)")
+    reg_classes = get_registered_classes()
+    reg_cols = st.columns(min(4, max(1, len(reg_classes))))
+    for idx, rc in enumerate(reg_classes):
+        with reg_cols[idx % len(reg_cols)]:
+            is_dynamic = rc["class_name"] not in ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+            tag = "<span style='color:#58a6ff; font-size:10px; font-weight:700;'>[NEW] </span>" if is_dynamic else ""
+            st.markdown(f"""
+            <div style="background-color: #161b22; border-left: 3px solid rgb({rc['color_rgb']}); padding: 8px 12px; border-radius: 6px; margin-bottom: 8px;">
+                <div style="font-size: 13px; font-weight: 700; color: #c9d1d9;">{tag}{rc['display_name']}</div>
+                <div style="font-size: 11px; color: #8b949e;">{rc['bin_name']}</div>
+                <div style="font-size: 10px; color: #58a6ff;">{rc['category']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    st.markdown("---")
     st.subheader("🚀 Candidate Retraining & Promotion Evaluation")
 
     min_required = 4
@@ -714,19 +843,27 @@ elif selected_tab == "🔄 Continuous Learning":
         g2.metric("Accuracy Delta", f"{comp.accuracy_delta:+.4f}", delta_color="normal")
         g3.metric("Sensitive 'Trash' Delta (> -0.02 Tol)", f"{comp.trash_f1_delta:+.4f}", delta_color="normal")
 
-        # Per-class comparison table
-        classes = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+        # Per-class comparison table (all classes: baseline + dynamic)
+        all_eval_classes = list(dict.fromkeys(list(comp.champion_metrics.per_class.keys()) + list(comp.candidate_metrics.per_class.keys())))
         p_rows = []
-        for c in classes:
-            cand_f1 = comp.candidate_metrics.per_class.get(c).f1_score if c in comp.candidate_metrics.per_class else 0.0
-            champ_f1 = comp.champion_metrics.per_class.get(c).f1_score if c in comp.champion_metrics.per_class else 0.0
-            diff = cand_f1 - champ_f1
+        for c in all_eval_classes:
+            cand_m = comp.candidate_metrics.per_class.get(c)
+            champ_m = comp.champion_metrics.per_class.get(c)
+            cand_f1 = cand_m.f1_score if cand_m else 0.0
+            champ_f1 = champ_m.f1_score if champ_m else 0.0
+            diff = cand_f1 - champ_f1 if champ_m else cand_f1
+            if champ_m is None:
+                status = "✨ NEW DYNAMIC CLASS"
+            elif diff >= -0.02:
+                status = "✅ PASS"
+            else:
+                status = "❌ REGRESSED"
             p_rows.append({
-                "Material": c.upper(),
-                "Champion F1": f"{champ_f1:.4f}",
+                "Class": c.replace("_", " ").upper(),
+                "Champion F1": f"{champ_f1:.4f}" if champ_m else "N/A (New)",
                 "Candidate F1": f"{cand_f1:.4f}",
-                "Delta": f"{diff:+.4f}",
-                "Status": "✅ PASS" if diff >= -0.02 else "❌ REGRESSED"
+                "Delta": f"{diff:+.4f}" if champ_m else f"+{cand_f1:.4f}",
+                "Status": status
             })
         st.dataframe(pd.DataFrame(p_rows), use_container_width=True)
 

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from edgeloop.common.config import get_config
 from edgeloop.common.database import get_db
+from edgeloop.common.classes import get_class_names, get_registered_classes
 
 logger = logging.getLogger("edgeloop.review")
 
@@ -97,8 +98,9 @@ class ReviewService:
 
     def submit_review(self, submission: ReviewSubmission) -> int:
         """Process reviewer verification, record audit trail, and persist ground truth."""
-        if submission.true_label not in self.VALID_CLASSES:
-            raise ValueError(f"Invalid label '{submission.true_label}'. Must be one of {self.VALID_CLASSES}")
+        valid_classes = set(self.VALID_CLASSES).union(get_class_names())
+        if submission.true_label not in valid_classes:
+            raise ValueError(f"Invalid label '{submission.true_label}'. Must be one of {sorted(list(valid_classes))}")
 
         if not submission.reviewer or not submission.reviewer.strip():
             raise ValueError("Reviewer identity cannot be blank.")

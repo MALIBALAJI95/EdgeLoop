@@ -17,6 +17,7 @@ import torchvision.models.detection as detection
 from torchvision import transforms
 
 from edgeloop.common.config import get_config
+from edgeloop.common.classes import get_bin_mapping, get_bin_mappings
 from edgeloop.drift.detector import DriftDetector
 from edgeloop.drift.features import DriftFeatureExtractor
 from edgeloop.inference.engine import InferenceEngine
@@ -119,6 +120,8 @@ class DetectedWasteObject(BaseModel):
     bin_guidance: str
     is_drift: bool = False
     triggered_features: List[str] = Field(default_factory=list)
+    is_uncertain: bool = False
+    display_label: str = ""
 
 
 class DetectionFrameResult(BaseModel):
@@ -285,7 +288,11 @@ class WasteObjectDetector:
                     predicted_waste = "paper"
                     confidence = 0.90
 
-            bin_info = BIN_MAPPINGS.get(predicted_waste, BIN_MAPPINGS["trash"])
+            bin_info = get_bin_mapping(predicted_waste)
+            is_uncertain = (confidence < 0.65) or (pred_res.entropy > 0.80)
+            disp_lbl = "Unknown / Uncertain — Needs Human Review" if is_uncertain else bin_info.get("display_name", predicted_waste.replace("_", " ").title())
+            sugg_bin = "Needs Human Review (Stop & Review)" if is_uncertain else bin_info["bin_name"]
+
             crop_feats = self.feature_extractor.extract_from_image(crop_img)
             crop_drift, crop_trig = self.drift_detector.check_sample(crop_feats, log_to_db=False)
 
@@ -297,11 +304,13 @@ class WasteObjectDetector:
                     waste_class=predicted_waste,
                     waste_confidence=confidence,
                     entropy=pred_res.entropy,
-                    suggested_bin=bin_info["bin_name"],
+                    suggested_bin=sugg_bin,
                     bin_code=bin_info["bin_code"],
                     bin_guidance=bin_info["guidance"],
                     is_drift=crop_drift,
-                    triggered_features=crop_trig
+                    triggered_features=crop_trig,
+                    is_uncertain=is_uncertain,
+                    display_label=disp_lbl
                 )
             )
 
@@ -312,7 +321,11 @@ class WasteObjectDetector:
             if w <= 512 and h <= 512:
                 # Isolated dataset image / benchmark crop
                 pred_res = self.classifier.predict_image(pil_img, sample_id="dataset_sample")
-                bin_info = BIN_MAPPINGS.get(pred_res.predicted_class, BIN_MAPPINGS["trash"])
+                bin_info = get_bin_mapping(pred_res.predicted_class)
+                is_uncertain = (pred_res.confidence < 0.65) or (pred_res.entropy > 0.80)
+                disp_lbl = "Unknown / Uncertain — Needs Human Review" if is_uncertain else bin_info.get("display_name", pred_res.predicted_class.replace("_", " ").title())
+                sugg_bin = "Needs Human Review (Stop & Review)" if is_uncertain else bin_info["bin_name"]
+
                 margin_x, margin_y = int(w * 0.08), int(h * 0.08)
                 detected_objects.append(
                     DetectedWasteObject(
@@ -322,11 +335,13 @@ class WasteObjectDetector:
                         waste_class=pred_res.predicted_class,
                         waste_confidence=pred_res.confidence,
                         entropy=pred_res.entropy,
-                        suggested_bin=bin_info["bin_name"],
+                        suggested_bin=sugg_bin,
                         bin_code=bin_info["bin_code"],
                         bin_guidance=bin_info["guidance"],
                         is_drift=frame_drift,
-                        triggered_features=frame_trig
+                        triggered_features=frame_trig,
+                        is_uncertain=is_uncertain,
+                        display_label=disp_lbl
                     )
                 )
             else:
@@ -366,7 +381,11 @@ class WasteObjectDetector:
                     pred_waste = "plastic"
                     conf = max(0.88, pred_res.class_probabilities.get("plastic", 0.0))
 
-                bin_info = BIN_MAPPINGS.get(pred_waste, BIN_MAPPINGS["trash"])
+                bin_info = get_bin_mapping(pred_waste)
+                is_uncertain = (conf < 0.65) or (pred_res.entropy > 0.80)
+                disp_lbl = "Unknown / Uncertain — Needs Human Review" if is_uncertain else bin_info.get("display_name", pred_waste.replace("_", " ").title())
+                sugg_bin = "Needs Human Review (Stop & Review)" if is_uncertain else bin_info["bin_name"]
+
                 crop_feats = self.feature_extractor.extract_from_image(crop_img)
                 crop_drift, crop_trig = self.drift_detector.check_sample(crop_feats, log_to_db=False)
 
@@ -378,11 +397,13 @@ class WasteObjectDetector:
                         waste_class=pred_waste,
                         waste_confidence=conf,
                         entropy=pred_res.entropy,
-                        suggested_bin=bin_info["bin_name"],
+                        suggested_bin=sugg_bin,
                         bin_code=bin_info["bin_code"],
                         bin_guidance=bin_info["guidance"],
                         is_drift=crop_drift,
-                        triggered_features=crop_trig
+                        triggered_features=crop_trig,
+                        is_uncertain=is_uncertain,
+                        display_label=disp_lbl
                     )
                 )
 
@@ -418,8 +439,16 @@ class WasteObjectDetector:
 
         for obj in detection_result.objects[:3]:
             x1, y1, x2, y2 = obj.box
-            bin_info = BIN_MAPPINGS.get(obj.waste_class, BIN_MAPPINGS["trash"])
+            bin_info = get_bin_mapping(obj.waste_class)
             bgr_color = bin_info["color_bgr"]
+
+            if obj.is_uncertain:
+                bgr_color = (0, 165, 255)  # Amber for uncertainty
+                label_text = f"UNCERTAIN ({obj.waste_confidence * 100:.0f}%) - Needs Review"
+            else:
+                bin_tag = obj.suggested_bin.split(" ")[0]
+                disp_name = bin_info.get("display_name", obj.waste_class.replace("_", " ").title())
+                label_text = f"{disp_name.upper()} {obj.waste_confidence * 100:.0f}% | {bin_tag} Bin"
 
             # 1. Clean thin bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), bgr_color, 2, cv2.LINE_AA)
@@ -435,9 +464,6 @@ class WasteObjectDetector:
             cv2.line(frame, (x2, y2), (x2 - line_len, y2), bgr_color, 4, cv2.LINE_AA)
             cv2.line(frame, (x2, y2), (x2, y2 - line_len), bgr_color, 4, cv2.LINE_AA)
 
-            # 3. Compact floating pill badge
-            bin_tag = obj.suggested_bin.split(" ")[0]
-            label_text = f"{obj.waste_class.upper()} {obj.waste_confidence * 100:.0f}% | {bin_tag} Bin"
             font = cv2.FONT_HERSHEY_SIMPLEX
             scale = 0.45
             thickness = 1
@@ -480,11 +506,17 @@ class WasteObjectDetector:
 
         for t in tracked_objects[:3]:
             x1, y1, x2, y2 = t.box
-            bin_info = BIN_MAPPINGS.get(t.waste_class, BIN_MAPPINGS["trash"])
+            bin_info = get_bin_mapping(t.waste_class)
             bgr_color = bin_info["color_bgr"]
 
-            if getattr(t, "is_uncertain", False):
-                bgr_color = (0, 215, 255)  # Amber for uncertainty
+            is_unc = getattr(t, "is_uncertain", False)
+            if is_unc:
+                bgr_color = (0, 165, 255)  # Amber for uncertainty
+                label_text = f"#{t.track_id} UNCERTAIN ({t.waste_confidence * 100:.0f}%) - Needs Review"
+            else:
+                bin_tag = t.suggested_bin.split(" ")[0]
+                disp_name = bin_info.get("display_name", t.waste_class.replace("_", " ").title())
+                label_text = f"#{t.track_id} {disp_name.upper()} {t.waste_confidence * 100:.0f}% | {bin_tag}"
 
             # 1. Clean thin bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), bgr_color, 2, cv2.LINE_AA)
@@ -499,12 +531,6 @@ class WasteObjectDetector:
             cv2.line(frame, (x1, y2), (x1, y2 - line_len), bgr_color, 4, cv2.LINE_AA)
             cv2.line(frame, (x2, y2), (x2 - line_len, y2), bgr_color, 4, cv2.LINE_AA)
             cv2.line(frame, (x2, y2), (x2, y2 - line_len), bgr_color, 4, cv2.LINE_AA)
-
-            # 3. Compact floating pill badge
-            bin_tag = t.suggested_bin.split(" ")[0]
-            label_text = f"#{t.track_id} {t.waste_class.upper()} {t.waste_confidence * 100:.0f}% | {bin_tag}"
-            if getattr(t, "is_uncertain", False):
-                label_text += " [?]"
 
             font = cv2.FONT_HERSHEY_SIMPLEX
             scale = 0.45

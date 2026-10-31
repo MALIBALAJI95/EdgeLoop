@@ -308,6 +308,9 @@ class ModelRegistry:
                 (approver.strip(), promotion_reason.strip(), str(self.champion_ckpt_path), now, candidate_version)
             )
 
+        from edgeloop.common.classes import sync_class_mapping_json
+        sync_class_mapping_json()
+
         logger.info("Successfully promoted candidate %s to active champion by %s.", candidate_version, approver)
         return self.get_champion()
 

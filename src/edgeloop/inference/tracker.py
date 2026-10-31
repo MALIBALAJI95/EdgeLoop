@@ -59,7 +59,8 @@ class TrackedWasteObject:
         self.crop_image = frame_crop
 
         # Uncertainty threshold: entropy > 0.8 or confidence < 0.65
-        self.is_uncertain = detection.entropy > 0.80 or detection.waste_confidence < 0.65
+        self.is_uncertain = getattr(detection, "is_uncertain", False) or detection.entropy > 0.80 or detection.waste_confidence < 0.65
+        self.display_label = getattr(detection, "display_label", detection.waste_class)
         self.is_reviewed = False
         self.is_confirmed = False
         self.user_label = detection.waste_class

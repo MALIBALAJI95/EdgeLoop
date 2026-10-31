@@ -120,11 +120,12 @@ def main():
     print(f"Sensitive Trash Delta:  {comp.trash_f1_delta:+.4f}")
 
     print("\nPer-Class F1 Breakdown:")
-    classes = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    classes = list(dict.fromkeys(list(comp.champion_metrics.per_class.keys()) + list(comp.candidate_metrics.per_class.keys())))
     for c in classes:
         cand_f1 = comp.candidate_metrics.per_class.get(c).f1_score if c in comp.candidate_metrics.per_class else 0.0
         champ_f1 = comp.champion_metrics.per_class.get(c).f1_score if c in comp.champion_metrics.per_class else 0.0
-        print(f"   • {c.upper():10s} -> Champion: {champ_f1:.4f} | Candidate: {cand_f1:.4f} | Delta: {cand_f1 - champ_f1:+.4f}")
+        champ_str = f"{champ_f1:.4f}" if c in comp.champion_metrics.per_class else "N/A (New)"
+        print(f"   • {c.upper():16s} -> Champion: {champ_str:10s} | Candidate: {cand_f1:.4f} | Delta: {cand_f1 - champ_f1:+.4f}")
 
     print("\nGate Verification:")
     for gate_name, passed in comp.gate_checks.items():

@@ -165,11 +165,12 @@ class ModelEvaluator:
         weighted_f1 = float(f1_score(y_true, y_pred, average="weighted", zero_division=0))
 
         # Per-class metrics
+        eval_classes = engine.classes
         prec, rec, f1, supp = precision_recall_fscore_support(
-            y_true, y_pred, labels=self.classes, zero_division=0
+            y_true, y_pred, labels=eval_classes, zero_division=0
         )
         per_class = {}
-        for i, cls_name in enumerate(self.classes):
+        for i, cls_name in enumerate(eval_classes):
             per_class[cls_name] = ClassMetrics(
                 precision=float(prec[i]),
                 recall=float(rec[i]),
@@ -177,7 +178,7 @@ class ModelEvaluator:
                 support=int(supp[i])
             )
 
-        cm = confusion_matrix(y_true, y_pred, labels=self.classes).tolist()
+        cm = confusion_matrix(y_true, y_pred, labels=eval_classes).tolist()
         mean_lat = float(np.mean(latencies)) if latencies else 0.0
 
         return EvaluationReport(
@@ -235,9 +236,10 @@ class ModelEvaluator:
                 f"Candidate trash F1 ({candidate_trash_f1:.4f}) regressed beyond acceptable limit (-{max_drop}) compared to champion ({champion_trash_f1:.4f}) (delta: {trash_f1_delta:+.4f})."
             )
 
-        # Gate 3: General Class Regression Check across all classes
+        # Gate 3: General Class Regression Check across common baseline classes
         gate_all_classes = True
-        for cls_name in self.classes:
+        common_classes = [c for c in self.classes if c in candidate_metrics.per_class and c in champion_metrics.per_class]
+        for cls_name in common_classes:
             cand_cls_f1 = candidate_metrics.per_class.get(cls_name).f1_score
             champ_cls_f1 = champion_metrics.per_class.get(cls_name).f1_score
             if cand_cls_f1 - champ_cls_f1 < -max_drop:

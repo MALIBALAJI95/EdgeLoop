@@ -15,6 +15,7 @@ from torchvision import models, transforms
 
 from edgeloop.common.config import get_config
 from edgeloop.common.database import get_db
+from edgeloop.common.classes import get_class_names
 
 logger = logging.getLogger("edgeloop.inference")
 
@@ -115,27 +116,38 @@ class InferenceEngine:
             raise CheckpointLoadError(f"Checkpoint not found at: {self.checkpoint_path}")
 
         try:
-            model = models.mobilenet_v2(weights=None)
-            num_classes = len(self.classes)
-            model.classifier[1] = nn.Linear(1280, num_classes)
-
             ckpt = torch.load(str(self.checkpoint_path), map_location=self.device)
 
             if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
                 state_dict = ckpt["model_state_dict"]
                 if "classes" in ckpt and isinstance(ckpt["classes"], list):
-                    self.classes = ckpt["classes"]
-                    self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
-                    self.idx_to_class = {i: c for i, c in enumerate(self.classes)}
+                    self.classes = list(ckpt["classes"])
             elif isinstance(ckpt, dict):
                 state_dict = ckpt
             else:
                 raise CheckpointLoadError(f"Unrecognized checkpoint object type: {type(ckpt)}")
 
+            # Infer num_classes from weight tensor if needed
+            if "classifier.1.weight" in state_dict:
+                ckpt_num_classes = state_dict["classifier.1.weight"].shape[0]
+                if len(self.classes) != ckpt_num_classes:
+                    all_reg = get_class_names()
+                    if len(all_reg) >= ckpt_num_classes:
+                        self.classes = all_reg[:ckpt_num_classes]
+                    else:
+                        self.classes = [f"class_{i}" for i in range(ckpt_num_classes)]
+
+            self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
+            self.idx_to_class = {i: c for i, c in enumerate(self.classes)}
+
+            num_classes = len(self.classes)
+            model = models.mobilenet_v2(weights=None)
+            model.classifier[1] = nn.Linear(1280, num_classes)
+
             model.load_state_dict(state_dict)
             model.to(self.device)
             model.eval()
-            logger.info("Successfully loaded MobileNetV2 from %s", self.checkpoint_path)
+            logger.info("Successfully loaded MobileNetV2 with %d classes from %s", num_classes, self.checkpoint_path)
             return model
         except Exception as e:
             if isinstance(e, CheckpointLoadError):

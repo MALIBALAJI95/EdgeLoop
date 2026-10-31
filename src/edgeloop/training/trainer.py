@@ -16,6 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import models, transforms
 
 from edgeloop.common.config import get_config
+from edgeloop.common.classes import get_class_names
 from edgeloop.training.evaluator import ModelEvaluator, EvaluationReport
 
 logger = logging.getLogger("edgeloop.training.trainer")
@@ -24,10 +25,16 @@ logger = logging.getLogger("edgeloop.training.trainer")
 class TrashDataset(Dataset):
     """PyTorch Dataset loading images and class labels."""
 
-    def __init__(self, df: pd.DataFrame, transform=None):
+    def __init__(self, df: pd.DataFrame, transform=None, classes: Optional[List[str]] = None):
         self.df = df.reset_index(drop=True)
         self.transform = transform
-        self.classes = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+        if classes is not None:
+            self.classes = list(classes)
+        else:
+            base_classes = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+            unique_labels = list(self.df["label"].unique()) if "label" in self.df.columns else []
+            extra = [c for c in unique_labels if c not in base_classes]
+            self.classes = base_classes + sorted(extra)
         self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
 
     def __len__(self) -> int:
@@ -49,7 +56,8 @@ class TrashDataset(Dataset):
         else:
             tensor = transforms.ToTensor()(img)
 
-        target = self.class_to_idx[row["label"]]
+        lbl = str(row["label"])
+        target = self.class_to_idx.get(lbl, 0)
         return tensor, target
 
 
@@ -133,32 +141,81 @@ class CandidateTrainer:
         epochs: int = 3,
         batch_size: int = 16,
         learning_rate: float = 1e-4,
-        base_checkpoint: Optional[Path] = None
+        base_checkpoint: Optional[Path] = None,
+        target_classes: Optional[List[str]] = None
     ) -> Tuple[Path, Dict[str, Any]]:
-        """Fine-tune MobileNetV2 on reviewed data and save candidate checkpoint."""
+        """Fine-tune MobileNetV2 on reviewed data and save candidate checkpoint supporting dynamic classes."""
+        # Determine target classes
+        base_classes = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+        registered_classes = get_class_names()
+        dataset_labels = list(dataset_df["label"].unique()) if "label" in dataset_df.columns else []
+
+        if target_classes is None:
+            combined = base_classes + [c for c in registered_classes if c not in base_classes] + [c for c in dataset_labels if c not in base_classes and c not in registered_classes]
+            target_classes = list(dict.fromkeys(combined))
+
+        num_classes = len(target_classes)
+        logger.info("Training candidate '%s' supporting %d classes: %s", candidate_name, num_classes, target_classes)
+
+        # Enrich training dataset with base class replay seeds if any base class is missing to avoid forgetting
+        existing_labels = set(dataset_df["label"].unique()) if "label" in dataset_df.columns else set()
+        base_seeds = [
+            ("plastic", "research/edgeloop/corrupted_edge/low_light/plastic_plastic418.jpg", "replay_plastic"),
+            ("paper", "research/edgeloop/corrupted_edge/low_light/paper_paper172.jpg", "replay_paper"),
+            ("metal", "research/edgeloop/corrupted_edge/blur/metal_metal29.jpg", "replay_metal"),
+            ("glass", "research/edgeloop/corrupted_edge/blur/glass_glass1.jpg", "replay_glass"),
+            ("cardboard", "research/edgeloop/corrupted_edge/low_light/cardboard_cardboard242.jpg", "replay_cardboard"),
+            ("trash", "research/edgeloop/corrupted_edge/low_light/paper_paper71.jpg", "replay_trash"),
+        ]
+        replay_rows = []
+        for lbl, p_str, sid in base_seeds:
+            if lbl not in existing_labels:
+                p = Path(self.config.root_dir) / p_str
+                if p.exists():
+                    replay_rows.append({"sample_id": sid, "image_path": str(p), "label": lbl})
+        if replay_rows:
+            dataset_df = pd.concat([dataset_df, pd.DataFrame(replay_rows)], ignore_index=True)
+
         train_df, val_df = self.group_train_val_split(dataset_df, val_fraction=0.20)
 
         train_loader = DataLoader(
-            TrashDataset(train_df, self.train_transform),
+            TrashDataset(train_df, self.train_transform, classes=target_classes),
             batch_size=batch_size,
             shuffle=True
         )
         val_loader = DataLoader(
-            TrashDataset(val_df, self.val_transform),
+            TrashDataset(val_df, self.val_transform, classes=target_classes),
             batch_size=batch_size,
             shuffle=False
         )
 
         model = models.mobilenet_v2(weights=None)
-        model.classifier[1] = nn.Linear(1280, 6)
+        model.classifier[1] = nn.Linear(1280, num_classes)
 
-        # Initialize from base checkpoint or champion
-        init_p = base_checkpoint or self.config.baseline_checkpoint_path
+        # Initialize from active champion or baseline checkpoint
+        init_p = base_checkpoint or (self.config.champion_checkpoint_path if self.config.champion_checkpoint_path.exists() else self.config.baseline_checkpoint_path)
         if init_p.exists():
             ckpt = torch.load(str(init_p), map_location=self.device)
             state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-            model.load_state_dict(state)
-            logger.info("Initialized candidate weights from %s", init_p)
+            old_num_classes = state["classifier.1.weight"].shape[0] if "classifier.1.weight" in state else 6
+
+            # Load backbone
+            backbone_state = {k: v for k, v in state.items() if not k.startswith("classifier.1.")}
+            model.load_state_dict(backbone_state, strict=False)
+
+            # Transfer existing class classifier weights
+            min_classes = min(old_num_classes, num_classes)
+            if "classifier.1.weight" in state:
+                model.classifier[1].weight.data[:min_classes, :] = state["classifier.1.weight"][:min_classes, :]
+            if "classifier.1.bias" in state:
+                model.classifier[1].bias.data[:min_classes] = state["classifier.1.bias"][:min_classes]
+
+            # Initialize weights for new dynamic classes
+            if num_classes > old_num_classes:
+                nn.init.kaiming_normal_(model.classifier[1].weight.data[old_num_classes:, :])
+                nn.init.zeros_(model.classifier[1].bias.data[old_num_classes:])
+
+            logger.info("Transferred %d existing class weights from %s; initialized %d new classes.", min_classes, init_p, num_classes - min_classes)
 
         model.to(self.device)
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -218,8 +275,9 @@ class CandidateTrainer:
         metadata = {
             "model_version": version,
             "architecture": "mobilenet_v2",
-            "classes": self.config.classes,
-            "class_to_idx": {c: i for i, c in enumerate(self.config.classes)},
+            "num_classes": num_classes,
+            "classes": target_classes,
+            "class_to_idx": {c: i for i, c in enumerate(target_classes)},
             "seed": self.seed,
             "best_val_accuracy": best_val_acc,
             "training_history": history,
