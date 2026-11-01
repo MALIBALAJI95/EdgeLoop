@@ -290,74 +290,37 @@ if selected_tab == "🎯 Live Sorting":
         with col_camera:
             st.subheader("📹 Real-Time Edge Sorting Camera")
 
-            # Camera diagnostic guidance to eliminate black screen
-            st.markdown("""
-            <div style="background-color: #161b22; border-left: 3px solid #58a6ff; padding: 8px 12px; border-radius: 6px; font-size: 12px; margin-bottom: 10px;">
-                <strong>Camera Diagnostic:</strong> If the feed displays as black, ensure camera permission is granted in your browser and you are accessing via <code>http://localhost:8501</code> (Secure Context).
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Two primary controls: Start Camera & Stop & Review
-            ctrl_c1, ctrl_c2 = st.columns([1, 1.2])
+            # Camera mode & streaming controls
+            ctrl_c1, ctrl_c2, ctrl_c3 = st.columns([1.3, 0.9, 1.0])
             with ctrl_c1:
-                cam_toggle = st.toggle("🎥 Camera Active", value=st.session_state.camera_active, key="cam_toggle_btn")
-                st.session_state.camera_active = cam_toggle
-
+                cam_mode = st.selectbox(
+                    "Video Source",
+                    ["🎥 Continuous Live Stream (FaceTime/Webcam)", "📸 Browser Snapshot Input"],
+                    key="cam_stream_mode"
+                )
             with ctrl_c2:
+                cam_active = st.toggle("Camera On", value=st.session_state.get("camera_active", True), key="cam_toggle_btn")
+                st.session_state.camera_active = cam_active
+
+            with ctrl_c3:
                 if st.button("🛑 Stop & Review", type="primary", use_container_width=True, key="stop_review_btn"):
+                    st.session_state.camera_active = False
                     st.session_state.session_phase = "REVIEW"
                     st.rerun()
 
-            if st.session_state.camera_active:
-                cam_snap = st.camera_input("Point camera at waste item:", key="live_edge_cam")
-
-                if cam_snap is not None:
-                    snap_img = Image.open(cam_snap).convert("RGB")
-                    det_res = detector.detect_and_classify(snap_img)
-                    st.session_state.last_detection_result = det_res
-
-                    if det_res.objects:
-                        # Spatial multi-object tracking across frames
-                        active_tracks = st.session_state.session_tracker.update(det_res.objects, full_image=snap_img)
-                        st.session_state.session_unique_objects = list(st.session_state.session_tracker.session_all_tracks.values())
-
-                        # Draw uncluttered bounding boxes with 2px corner brackets
-                        annotated = detector.draw_tracked_overlays(snap_img, active_tracks if active_tracks else det_res.objects)
-                        st.image(annotated, caption=f"Localized {det_res.total_objects} item(s) • Material: {det_res.dominant_class.upper()} • Bin: {det_res.dominant_bin}", use_container_width=True)
-
-                        # Auto-log detections to database
-                        save_dir = Path("data/incoming")
-                        save_dir.mkdir(parents=True, exist_ok=True)
-                        for idx, obj in enumerate(det_res.objects):
-                            sample_id = f"cam_live_{int(time.time())}_{idx+1}"
-                            img_path = save_dir / f"{sample_id}.jpg"
-                            snap_img.save(img_path)
-
-                            db.log_inference(
-                                sample_id=sample_id,
-                                image_path=str(img_path.resolve()),
-                                predicted_class=obj.waste_class,
-                                confidence=obj.waste_confidence,
-                                entropy=obj.entropy,
-                                latency_ms=det_res.processing_time_ms,
-                                model_version=champ_ver,
-                                condition="camera_live_auto"
-                            )
-                    else:
-                        st.image(snap_img, caption="Camera active — Present a waste item (bottle, book, can, container)", use_container_width=True)
-                        st.info("ℹ️ Present a waste item in view. The system rejects living things and furniture.")
-            else:
-                st.info("Camera is currently paused. Toggle 'Camera Active' above to restart streaming.")
+            video_frame_placeholder = st.empty()
+            diagnostic_placeholder = st.empty()
 
         with col_sidebar:
             st.subheader("♻️ Suggested Recycling Bin")
+            bin_placeholder = st.empty()
 
             if curr_res and curr_res.objects:
                 dom_obj = curr_res.objects[0]
-                bin_data = BIN_MAPPINGS.get(dom_obj.waste_class, BIN_MAPPINGS["trash"])
+                bin_data = get_bin_mapping(dom_obj.waste_class)
                 r, g, b = bin_data["color_rgb"]
 
-                st.markdown(f"""
+                bin_placeholder.markdown(f"""
                 <div class="bin-card" style="background: linear-gradient(135deg, rgba({r},{g},{b},0.92) 0%, rgba({r},{g},{b},0.65) 100%);">
                     <div class="bin-title">{bin_data['bin_name']}</div>
                     <div style="font-size: 15px; font-weight: 600; margin: 4px 0;">
@@ -367,7 +330,7 @@ if selected_tab == "🎯 Live Sorting":
                 </div>
                 """, unsafe_allow_html=True)
             else:
-                st.info("Awaiting camera input. Present an item to view recycling bin guidance.")
+                bin_placeholder.info("Awaiting camera input. Present an item to view recycling bin guidance.")
 
             st.markdown("---")
             st.subheader("📊 Category Counts")
@@ -399,6 +362,103 @@ if selected_tab == "🎯 Live Sorting":
                     st.markdown(f"• **{r['sample_id']}**: `{r['predicted_class'].upper()}` ({r['confidence']*100:.1f}%) • *{r['latency_ms']:.1f}ms* <span style='color:#8b949e; font-size:11px;'>({r['created_at'][11:19]})</span>", unsafe_allow_html=True)
             else:
                 st.write("No inferences recorded yet.")
+
+        # Live Video Processing Loop
+        if st.session_state.camera_active:
+            if cam_mode == "🎥 Continuous Live Stream (FaceTime/Webcam)":
+                cap = cv2.VideoCapture(0)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+                if not cap.isOpened():
+                    diagnostic_placeholder.error(
+                        "❌ Hardware camera could not be opened directly. Please grant camera permission or select '📸 Browser Snapshot Input' above."
+                    )
+                else:
+                    try:
+                        frame_count = 0
+                        while st.session_state.camera_active and st.session_state.session_phase == "LIVE":
+                            ret, frame = cap.read()
+                            if not ret:
+                                break
+
+                            # Mirror flip for natural selfie / kiosk view
+                            frame = cv2.flip(frame, 1)
+                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            pil_img = Image.fromarray(rgb_frame)
+
+                            det_res = detector.detect_and_classify(pil_img)
+                            st.session_state.last_detection_result = det_res
+
+                            if det_res.objects:
+                                active_tracks = st.session_state.session_tracker.update(det_res.objects, full_image=pil_img)
+                                st.session_state.session_unique_objects = list(st.session_state.session_tracker.session_all_tracks.values())
+                                annotated = detector.draw_tracked_overlays(pil_img, active_tracks if active_tracks else det_res.objects)
+                                video_frame_placeholder.image(
+                                    annotated,
+                                    caption=f"🟢 LIVE STREAMING • Localized {det_res.total_objects} item(s) • Material: {det_res.dominant_class.upper()} • {det_res.processing_time_ms:.1f}ms",
+                                    use_container_width=True
+                                )
+
+                                # Update bin recommendation dynamically in sidebar
+                                dom_obj = det_res.objects[0]
+                                b_info = get_bin_mapping(dom_obj.waste_class)
+                                r, g, b = b_info["color_rgb"]
+                                bin_placeholder.markdown(f"""
+                                <div class="bin-card" style="background: linear-gradient(135deg, rgba({r},{g},{b},0.92) 0%, rgba({r},{g},{b},0.65) 100%);">
+                                    <div class="bin-title">{b_info['bin_name']}</div>
+                                    <div style="font-size: 15px; font-weight: 600; margin: 4px 0;">
+                                        Target Material: {dom_obj.waste_class.upper()} ({dom_obj.waste_confidence * 100:.1f}%)
+                                    </div>
+                                    <div style="font-size: 12px; opacity: 0.95;">{b_info['guidance']}</div>
+                                </div>
+                                """, unsafe_allow_html=True)
+
+                                # Sample rate limiting for database logging (every 15 frames)
+                                if frame_count % 15 == 0:
+                                    save_dir = Path("data/incoming")
+                                    save_dir.mkdir(parents=True, exist_ok=True)
+                                    for idx, obj in enumerate(det_res.objects):
+                                        sample_id = f"cam_live_{int(time.time())}_{idx+1}"
+                                        img_p = save_dir / f"{sample_id}.jpg"
+                                        pil_img.save(img_p)
+                                        db.log_inference(
+                                            sample_id=sample_id,
+                                            image_path=str(img_p.resolve()),
+                                            predicted_class=obj.waste_class,
+                                            confidence=obj.waste_confidence,
+                                            entropy=obj.entropy,
+                                            latency_ms=det_res.processing_time_ms,
+                                            model_version=champ_ver,
+                                            condition="camera_live_stream"
+                                        )
+                            else:
+                                video_frame_placeholder.image(
+                                    rgb_frame,
+                                    caption="🟢 LIVE STREAMING • Point camera at a recyclable item (bottle, cup, can, box, carton, book)",
+                                    use_container_width=True
+                                )
+
+                            frame_count += 1
+                            time.sleep(0.03)
+                    finally:
+                        cap.release()
+            else:
+                # Browser snapshot input
+                cam_snap = st.camera_input("Point camera at waste item:", key="live_edge_cam")
+                if cam_snap is not None:
+                    snap_img = Image.open(cam_snap).convert("RGB")
+                    det_res = detector.detect_and_classify(snap_img)
+                    st.session_state.last_detection_result = det_res
+                    if det_res.objects:
+                        active_tracks = st.session_state.session_tracker.update(det_res.objects, full_image=snap_img)
+                        st.session_state.session_unique_objects = list(st.session_state.session_tracker.session_all_tracks.values())
+                        annotated = detector.draw_tracked_overlays(snap_img, active_tracks if active_tracks else det_res.objects)
+                        video_frame_placeholder.image(annotated, caption=f"Localized {det_res.total_objects} item(s) • Material: {det_res.dominant_class.upper()} • Bin: {det_res.dominant_bin}", use_container_width=True)
+                    else:
+                        video_frame_placeholder.image(snap_img, caption="Camera active — Present a waste item", use_container_width=True)
+        else:
+            video_frame_placeholder.info("Camera is currently paused. Toggle 'Camera On' above to start streaming.")
 
     # --------------------------------------------------------------------------
     # SUB-PHASE 1B: STOP & REVIEW AUDIT PANEL
