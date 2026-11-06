@@ -71,6 +71,9 @@ data/incoming/*
 !data/incoming/README.md
 data/reviewed/*
 !data/reviewed/.gitkeep
+data/live_stream/*
+!data/live_stream/.gitkeep
+data/live_stream/crops/
 
 # Checkpoints generated at runtime (keep directories and initial champion)
 artifacts/candidates/*

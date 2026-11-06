@@ -277,6 +277,12 @@ class Database:
             cursor.execute("UPDATE selection_queue SET status = 'reviewed' WHERE id = ?", (queue_id,))
             return review_id
 
+    def dismiss_queue_item(self, queue_id: int) -> None:
+        """Mark a queue item as dismissed so it is excluded from training."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE selection_queue SET status = 'dismissed' WHERE id = ?", (queue_id,))
+
     def get_model_by_version(self, version: str) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -366,6 +372,57 @@ class Database:
             cursor.execute("SELECT COUNT(*) as cnt FROM review_records")
             row = cursor.fetchone()
             return row["cnt"] if row else 0
+
+    def delete_review_record(self, record_id: int) -> bool:
+        """Delete an individual record from review_records table."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM review_records WHERE id = ?", (record_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def prune_non_seed_reviews(self, class_name: Optional[str] = None) -> int:
+        """Purge non-seed review records for a specific class or across all classes."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if class_name:
+                cursor.execute(
+                    "DELETE FROM review_records WHERE true_label = ? AND reviewer != 'system_seed'",
+                    (class_name,)
+                )
+            else:
+                cursor.execute("DELETE FROM review_records WHERE reviewer != 'system_seed'")
+            conn.commit()
+            return cursor.rowcount
+
+    def get_review_records(self, limit: int = 100, class_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch review records with optional class filtering."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if class_filter and class_filter != "all":
+                cursor.execute(
+                    """
+                    SELECT id, inference_id, sample_id, image_path, predicted_class,
+                           true_label, is_corrected, reviewer, notes, reviewed_at
+                    FROM review_records
+                    WHERE true_label = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (class_filter, limit)
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, inference_id, sample_id, image_path, predicted_class,
+                           true_label, is_corrected, reviewer, notes, reviewed_at
+                    FROM review_records
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                )
+            return [dict(r) for r in cursor.fetchall()]
 
 
 # Global database accessor

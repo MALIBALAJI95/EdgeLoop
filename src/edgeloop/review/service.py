@@ -51,7 +51,7 @@ class DatasetVersionInfo(BaseModel):
 class ReviewService:
     """Manages human-in-the-loop review and provenance-backed dataset curation."""
 
-    VALID_CLASSES = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    VALID_CLASSES = ["cardboard", "glass", "metal", "paper", "plastic", "trash", "electronic_waste"]
 
     def __init__(self):
         self.config = get_config()
@@ -143,6 +143,27 @@ class ReviewService:
             submission.queue_id, sample_id, predicted_class, submission.true_label, submission.reviewer
         )
         return review_id
+
+    def dismiss_item(self, queue_id: int) -> None:
+        """Dismiss a pending review item so it is excluded from the queue and retraining."""
+        self.db.dismiss_queue_item(queue_id)
+        logger.info("Dismissed review queue item: queue_id=%d", queue_id)
+
+    def delete_verified_record(self, record_id: int) -> bool:
+        """Delete an erroneous or noisy verified record from ground-truth training data."""
+        deleted = self.db.delete_review_record(record_id)
+        logger.info("Deleted verified review record: record_id=%d (success=%s)", record_id, deleted)
+        return deleted
+
+    def prune_verified_records(self, class_name: Optional[str] = None) -> int:
+        """Purge non-seed verified review records to clean training sets."""
+        count = self.db.prune_non_seed_reviews(class_name)
+        logger.info("Pruned %d verified records for class: %s", count, class_name or "all non-seed")
+        return count
+
+    def get_verified_records(self, limit: int = 100, class_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch review records with optional class filtering."""
+        return self.db.get_review_records(limit=limit, class_filter=class_filter)
 
     def export_dataset_version(self, description: Optional[str] = None) -> DatasetVersionInfo:
         """

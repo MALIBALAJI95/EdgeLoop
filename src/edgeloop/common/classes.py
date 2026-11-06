@@ -69,6 +69,16 @@ DEFAULT_CLASSES: List[Dict[str, Any]] = [
         "color_bgr": "53,216,253"
     },
     {
+        "class_name": "electronic_waste",
+        "display_name": "Electronic Waste",
+        "category": "E-Waste, Gadgets & Batteries",
+        "bin_name": "Red/Orange Bin (E-Waste & Electronics)",
+        "bin_code": "EWASTE_RED",
+        "bin_guidance": "Laptops, phones, batteries, chargers, cables, circuit boards, and electronic accessories.",
+        "color_rgb": "255,107,0",
+        "color_bgr": "0,107,255"
+    },
+    {
         "class_name": "trash",
         "display_name": "Trash",
         "category": "Non-Recyclable General Refuse",
@@ -108,28 +118,25 @@ def ensure_classes_table() -> None:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_class_name ON waste_classes(class_name)")
 
-        # Check if baseline is seeded
-        cursor.execute("SELECT COUNT(*) as cnt FROM waste_classes")
-        row = cursor.fetchone()
-        if row is None or row["cnt"] == 0:
-            now = datetime.now(timezone.utc).isoformat()
-            for cls_info in DEFAULT_CLASSES:
-                cursor.execute("""
-                    INSERT OR IGNORE INTO waste_classes (
-                        class_name, display_name, category, bin_name, bin_code,
-                        bin_guidance, color_rgb, color_bgr, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    cls_info["class_name"],
-                    cls_info["display_name"],
-                    cls_info["category"],
-                    cls_info["bin_name"],
-                    cls_info["bin_code"],
-                    cls_info["bin_guidance"],
-                    cls_info["color_rgb"],
-                    cls_info["color_bgr"],
-                    now
-                ))
+        # Always ensure all baseline classes (including electronic_waste) are present in SQLite
+        now = datetime.now(timezone.utc).isoformat()
+        for cls_info in DEFAULT_CLASSES:
+            cursor.execute("""
+                INSERT OR IGNORE INTO waste_classes (
+                    class_name, display_name, category, bin_name, bin_code,
+                    bin_guidance, color_rgb, color_bgr, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                cls_info["class_name"],
+                cls_info["display_name"],
+                cls_info["category"],
+                cls_info["bin_name"],
+                cls_info["bin_code"],
+                cls_info["bin_guidance"],
+                cls_info["color_rgb"],
+                cls_info["color_bgr"],
+                now
+            ))
 
 
 def get_registered_classes() -> List[Dict[str, Any]]:

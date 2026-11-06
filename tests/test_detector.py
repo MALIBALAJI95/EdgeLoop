@@ -49,7 +49,7 @@ def test_detector_draw_overlays(detector, sample_image):
 
 
 def test_bin_mapping_consistency():
-    classes = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
+    classes = ["cardboard", "glass", "metal", "paper", "plastic", "electronic_waste", "trash"]
     for c in classes:
         assert c in BIN_MAPPINGS
         assert "bin_name" in BIN_MAPPINGS[c]

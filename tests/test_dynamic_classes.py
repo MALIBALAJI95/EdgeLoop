@@ -39,8 +39,9 @@ def test_dynamic_class_registration(tmp_path, monkeypatch):
     # 1. Baseline classes exist
     ensure_classes_table()
     classes = get_class_names()
-    assert len(classes) == 6
+    assert len(classes) == 7
     assert "plastic" in classes
+    assert "electronic_waste" in classes
     assert "trash" in classes
 
     # 2. Register dynamic new class
@@ -55,7 +56,7 @@ def test_dynamic_class_registration(tmp_path, monkeypatch):
 
     # 3. Verify persistence
     updated_classes = get_class_names()
-    assert len(updated_classes) == 7
+    assert len(updated_classes) == 8
     assert "juice_carton" in updated_classes
 
     bin_info = get_bin_mapping("juice_carton")

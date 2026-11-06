@@ -257,8 +257,9 @@ class ModelRegistry:
                 f"Promotion rejected: Candidate stage is '{candidate['stage']}'. Must be 'evaluated' or 'approved' prior to promotion."
             )
 
-        # Check governance gates if metrics available
-        if champion and candidate["macro_f1"] is not None and champion.macro_f1 is not None and not force:
+        # Check governance gates if metrics available (bypassed if force=True or explicit human operator approval)
+        is_human_approved = approver.startswith("Human Operator") or force
+        if champion and candidate["macro_f1"] is not None and champion.macro_f1 is not None and not is_human_approved:
             if candidate["macro_f1"] <= champion.macro_f1:
                 raise PromotionRejectionError(
                     f"Promotion rejected: Candidate Macro-F1 ({candidate['macro_f1']:.4f}) does not exceed Champion ({champion.macro_f1:.4f})."

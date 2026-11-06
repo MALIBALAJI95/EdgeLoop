@@ -142,7 +142,8 @@ class CandidateTrainer:
         batch_size: int = 16,
         learning_rate: float = 1e-4,
         base_checkpoint: Optional[Path] = None,
-        target_classes: Optional[List[str]] = None
+        target_classes: Optional[List[str]] = None,
+        progress_callback: Optional[Any] = None
     ) -> Tuple[Path, Dict[str, Any]]:
         """Fine-tune MobileNetV2 on reviewed data and save candidate checkpoint supporting dynamic classes."""
         # Determine target classes
@@ -157,22 +158,32 @@ class CandidateTrainer:
         num_classes = len(target_classes)
         logger.info("Training candidate '%s' supporting %d classes: %s", candidate_name, num_classes, target_classes)
 
-        # Enrich training dataset with base class replay seeds if any base class is missing to avoid forgetting
-        existing_labels = set(dataset_df["label"].unique()) if "label" in dataset_df.columns else set()
-        base_seeds = [
-            ("plastic", "research/edgeloop/corrupted_edge/low_light/plastic_plastic418.jpg", "replay_plastic"),
-            ("paper", "research/edgeloop/corrupted_edge/low_light/paper_paper172.jpg", "replay_paper"),
-            ("metal", "research/edgeloop/corrupted_edge/blur/metal_metal29.jpg", "replay_metal"),
-            ("glass", "research/edgeloop/corrupted_edge/blur/glass_glass1.jpg", "replay_glass"),
-            ("cardboard", "research/edgeloop/corrupted_edge/low_light/cardboard_cardboard242.jpg", "replay_cardboard"),
-            ("trash", "research/edgeloop/corrupted_edge/low_light/paper_paper71.jpg", "replay_trash"),
-        ]
+        # Enrich training dataset with base class replay exemplars to prevent catastrophic forgetting
+        replay_dir = Path(self.config.root_dir) / "research" / "edgeloop" / "corrupted_edge" / "low_light"
         replay_rows = []
-        for lbl, p_str, sid in base_seeds:
-            if lbl not in existing_labels:
+        if replay_dir.exists():
+            for bc in base_classes:
+                bc_imgs = sorted(list(replay_dir.glob(f"{bc}_*.jpg")))[:4]
+                for idx, img_p in enumerate(bc_imgs):
+                    replay_rows.append({
+                        "sample_id": f"replay_{bc}_{idx+1}",
+                        "image_path": str(img_p),
+                        "label": bc
+                    })
+        else:
+            base_seeds = [
+                ("plastic", "research/edgeloop/corrupted_edge/low_light/plastic_plastic418.jpg", "replay_plastic"),
+                ("paper", "research/edgeloop/corrupted_edge/low_light/paper_paper172.jpg", "replay_paper"),
+                ("metal", "research/edgeloop/corrupted_edge/blur/metal_metal29.jpg", "replay_metal"),
+                ("glass", "research/edgeloop/corrupted_edge/blur/glass_glass1.jpg", "replay_glass"),
+                ("cardboard", "research/edgeloop/corrupted_edge/low_light/cardboard_cardboard242.jpg", "replay_cardboard"),
+                ("trash", "research/edgeloop/corrupted_edge/low_light/paper_paper71.jpg", "replay_trash"),
+            ]
+            for lbl, p_str, sid in base_seeds:
                 p = Path(self.config.root_dir) / p_str
                 if p.exists():
                     replay_rows.append({"sample_id": sid, "image_path": str(p), "label": lbl})
+
         if replay_rows:
             dataset_df = pd.concat([dataset_df, pd.DataFrame(replay_rows)], ignore_index=True)
 
@@ -217,8 +228,14 @@ class CandidateTrainer:
 
             logger.info("Transferred %d existing class weights from %s; initialized %d new classes.", min_classes, init_p, num_classes - min_classes)
 
+        # Freeze early backbone layers (first 14 blocks) to prevent forgetting baseline representations
+        for block_idx in range(min(14, len(model.features))):
+            for param in model.features[block_idx].parameters():
+                param.requires_grad = False
+
         model.to(self.device)
-        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = torch.optim.Adam(trainable_params, lr=learning_rate)
         criterion = nn.CrossEntropyLoss()
 
         history = []
@@ -262,6 +279,12 @@ class CandidateTrainer:
             }
             history.append(epoch_record)
             logger.info("Epoch %d/%d - Train Loss: %.4f - Val Loss: %.4f - Val Acc: %.4f", epoch, epochs, train_loss, val_loss, val_acc)
+
+            if progress_callback:
+                try:
+                    progress_callback(epoch, epochs, epoch_record)
+                except Exception:
+                    pass
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc

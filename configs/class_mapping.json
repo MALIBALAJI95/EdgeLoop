@@ -5,6 +5,7 @@
     "metal",
     "paper",
     "plastic",
+    "electronic_waste",
     "trash"
   ],
   "class_to_idx": {
@@ -13,7 +14,8 @@
     "metal": 2,
     "paper": 3,
     "plastic": 4,
-    "trash": 5
+    "electronic_waste": 5,
+    "trash": 6
   },
   "idx_to_class": {
     "0": "cardboard",
@@ -21,6 +23,7 @@
     "2": "metal",
     "3": "paper",
     "4": "plastic",
-    "5": "trash"
+    "5": "electronic_waste",
+    "6": "trash"
   }
 }

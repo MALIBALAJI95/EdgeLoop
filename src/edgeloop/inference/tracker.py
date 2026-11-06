@@ -38,33 +38,50 @@ class TrackedWasteObject:
     def __init__(
         self,
         track_id: int,
-        detection: DetectedWasteObject,
-        frame_crop: Optional[Image.Image] = None
+        detection: Optional[DetectedWasteObject] = None,
+        frame_crop: Optional[Image.Image] = None,
+        **kwargs
     ):
         self.track_id = track_id
-        self.box = list(detection.box)
-        self.detector_label = detection.detector_label
-        self.waste_class = detection.waste_class
-        self.waste_confidence = detection.waste_confidence
-        self.entropy = detection.entropy
-        self.suggested_bin = detection.suggested_bin
-        self.bin_code = detection.bin_code
-        self.bin_guidance = detection.bin_guidance
-        self.is_drift = detection.is_drift
+        if detection is not None:
+            self.box = list(detection.box)
+            self.detector_label = detection.detector_label
+            self.detector_confidence = getattr(detection, "detector_confidence", 1.0)
+            self.waste_class = detection.waste_class
+            self.waste_confidence = detection.waste_confidence
+            self.entropy = detection.entropy
+            self.suggested_bin = detection.suggested_bin
+            self.bin_code = detection.bin_code
+            self.bin_guidance = detection.bin_guidance
+            self.is_drift = detection.is_drift
 
-        self.first_seen = time.time()
-        self.last_seen = time.time()
-        self.hit_streak = 1
-        self.disappeared_frames = 0
-        self.crop_image = frame_crop
+            # Uncertainty threshold: genuinely ambiguous prediction (low confidence and elevated entropy)
+            self.is_uncertain = getattr(detection, "is_uncertain", False) or (detection.waste_confidence < 0.65 and detection.entropy > 0.80)
+            self.display_label = getattr(detection, "display_label", detection.waste_class)
+        else:
+            self.box = list(kwargs.get("box", [0, 0, 100, 100]))
+            self.detector_label = kwargs.get("detector_label", "waste_item")
+            self.detector_confidence = float(kwargs.get("detector_confidence", 1.0))
+            self.waste_class = kwargs.get("waste_class", "trash")
+            self.waste_confidence = float(kwargs.get("waste_confidence", 0.9))
+            self.entropy = float(kwargs.get("entropy", 0.2))
+            self.suggested_bin = kwargs.get("suggested_bin", "General Waste")
+            self.bin_code = kwargs.get("bin_code", "TRASH")
+            self.bin_guidance = kwargs.get("bin_guidance", "")
+            self.is_drift = kwargs.get("is_drift", False)
+            self.is_uncertain = kwargs.get("is_uncertain", False) or (self.waste_confidence < 0.65 and self.entropy > 0.80)
+            self.display_label = kwargs.get("display_label", self.waste_class.title())
 
-        # Uncertainty threshold: entropy > 0.8 or confidence < 0.65
-        self.is_uncertain = getattr(detection, "is_uncertain", False) or detection.entropy > 0.80 or detection.waste_confidence < 0.65
-        self.display_label = getattr(detection, "display_label", detection.waste_class)
-        self.is_reviewed = False
-        self.is_confirmed = False
-        self.user_label = detection.waste_class
-        self.is_rejected = False
+        self.first_seen = kwargs.get("first_seen_timestamp", time.time())
+        self.last_seen = kwargs.get("last_seen_timestamp", time.time())
+        self.hit_streak = kwargs.get("hit_streak", 1)
+        self.disappeared_frames = kwargs.get("disappeared_frames", 0)
+        self.crop_image = frame_crop if frame_crop is not None else kwargs.get("crop_image")
+
+        self.is_reviewed = kwargs.get("is_reviewed", False)
+        self.is_confirmed = kwargs.get("is_confirmed", False)
+        self.user_label = kwargs.get("user_label", self.waste_class)
+        self.is_rejected = kwargs.get("is_rejected", False)
 
     def update(
         self,
@@ -77,18 +94,31 @@ class TrackedWasteObject:
         for i in range(4):
             self.box[i] = int(alpha * detection.box[i] + (1.0 - alpha) * self.box[i])
 
-        # If new crop has higher confidence, update representation
-        if detection.waste_confidence > self.waste_confidence:
-            self.waste_class = detection.waste_class
-            self.waste_confidence = detection.waste_confidence
+        self.detector_confidence = getattr(detection, "detector_confidence", getattr(self, "detector_confidence", 1.0))
+
+        # Temporal stability filter: lock in the standardized label identity
+        # and prevent flickering across consecutive video frames
+        is_established = self.hit_streak >= 2 and self.waste_confidence >= 0.70
+        is_higher_confidence = detection.waste_confidence > (self.waste_confidence + 0.12)
+        if (not is_established) or is_higher_confidence:
+            # Update or refine identity
+            if not is_established or detection.waste_confidence >= 0.65:
+                self.waste_class = detection.waste_class
+                self.display_label = getattr(detection, "display_label", detection.waste_class.title())
+                self.suggested_bin = detection.suggested_bin
+                self.bin_code = detection.bin_code
+                self.bin_guidance = detection.bin_guidance
+            self.waste_confidence = max(self.waste_confidence, detection.waste_confidence)
             self.entropy = detection.entropy
-            self.suggested_bin = detection.suggested_bin
-            self.bin_code = detection.bin_code
-            self.bin_guidance = detection.bin_guidance
             self.is_drift = detection.is_drift
-            self.is_uncertain = detection.entropy > 0.80 or detection.waste_confidence < 0.65
+            self.is_uncertain = getattr(detection, "is_uncertain", False)
             if frame_crop is not None:
                 self.crop_image = frame_crop
+        else:
+            # Maintain stable confirmed label identity and gently smooth confidence
+            self.waste_confidence = max(self.waste_confidence, detection.waste_confidence)
+            if not getattr(self, "display_label", None):
+                self.display_label = getattr(detection, "display_label", detection.waste_class.title())
 
         self.last_seen = time.time()
         self.hit_streak += 1
@@ -133,7 +163,7 @@ class StreamObjectTracker:
                 track.disappeared_frames += 1
                 if track.disappeared_frames > self.max_disappeared:
                     del self.active_tracks[tid]
-            return [t for t in self.active_tracks.values() if t.hit_streak >= self.min_hits_to_confirm]
+            return []
 
         # Pairwise IoU matrix between active tracks and current detections
         matched_tracks = set()
@@ -195,8 +225,8 @@ class StreamObjectTracker:
                 if self.active_tracks[tid].disappeared_frames > self.max_disappeared:
                     del self.active_tracks[tid]
 
-        # Return visible tracks
-        return [t for t in self.active_tracks.values()]
+        # Return strictly visible tracks matched in the current frame
+        return [t for t in self.active_tracks.values() if t.disappeared_frames == 0]
 
     def get_session_unique_objects(self) -> List[TrackedWasteObject]:
         """Return all unique objects observed in the active session."""

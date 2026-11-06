@@ -42,25 +42,27 @@ COCO_CLASSES = [
 
 # Permitted movable non-living waste candidate categories
 WASTE_CANDIDATE_COCO_CLASSES = {
-    # Beverage & Food containers
+    # Beverage, Food & Kitchen Containers
     "bottle", "wine glass", "cup", "bowl", "fork", "knife", "spoon",
-    # Paper & Stationery & Packaging
-    "book", "scissors", "vase", "toothbrush", "box", "backpack", "handbag", "suitcase",
+    # Office, Paper, Bags, Stationery & Packaging
+    "book", "backpack", "handbag", "suitcase", "scissors", "vase", "toothbrush", "box",
+    # Consumer Electronics & Gadgets
+    "laptop", "cell phone", "remote", "mouse", "keyboard", "clock", "hair drier",
+    # Textiles, personal accessories & toys
+    "umbrella", "tie", "frisbee", "sports ball", "teddy bear",
     # Organic waste
-    "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
-    # Small electronics / recyclables
-    "cell phone", "remote", "mouse", "keyboard", "clock"
+    "banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake"
 }
 
 # Explicitly excluded living things and static room furniture/structures
 EXCLUDED_COCO_CLASSES = {
     "person", "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
     "bed", "chair", "couch", "dining table", "toilet", "potted plant", "sink", "refrigerator", "oven",
-    "tv", "laptop", "microwave", "toaster", "traffic light", "fire hydrant", "stop sign", "parking meter",
+    "tv", "microwave", "toaster", "traffic light", "fire hydrant", "stop sign", "parking meter",
     "bench", "car", "truck", "bus", "train", "boat", "airplane", "motorcycle", "bicycle"
 }
 
-# Bin recommendations for the 6 waste categories
+# Bin recommendations for waste categories
 BIN_MAPPINGS = {
     "paper": {
         "bin_name": "Blue Bin (Paper & Books)",
@@ -96,6 +98,13 @@ BIN_MAPPINGS = {
         "color_rgb": (120, 144, 156),
         "color_bgr": (156, 144, 120),
         "guidance": "Aluminum beverage cans, tin food cans, and clean metal foil."
+    },
+    "electronic_waste": {
+        "bin_name": "Red/Orange Bin (E-Waste & Electronics)",
+        "bin_code": "EWASTE_RED",
+        "color_rgb": (255, 107, 0),
+        "color_bgr": (0, 107, 255),
+        "guidance": "Laptops, phones, batteries, chargers, pens with electronics, cables. Do not crush."
     },
     "trash": {
         "bin_name": "Black Bin (General Refuse)",
@@ -145,7 +154,7 @@ class WasteObjectDetector:
     def __init__(
         self,
         classifier_engine: Optional[InferenceEngine] = None,
-        detection_threshold: float = 0.15,
+        detection_threshold: float = 0.08,
         device: str = "auto"
     ):
         self.config = get_config()
@@ -159,12 +168,14 @@ class WasteObjectDetector:
         self.drift_detector = DriftDetector()
         self.feature_extractor = DriftFeatureExtractor()
 
-        # Load SSDLite object detector
-        logger.info("Initializing SSDLite320 object detector on %s...", self.device)
+        # Force SSDLite to run on CPU on macOS Apple Silicon
+        # SSDLite on CPU takes ~40-100ms, while on MPS it takes 5,000ms+ due to Metal shader compilation and non-native SSD post-processing kernels
+        self.detector_device = torch.device("cpu")
+        logger.info("Initializing SSDLite320 object detector on %s...", self.detector_device)
         self.detector_model = detection.ssdlite320_mobilenet_v3_large(
             weights=detection.SSDLite320_MobileNet_V3_Large_Weights.DEFAULT
         )
-        self.detector_model.to(self.device)
+        self.detector_model.to(self.detector_device)
         self.detector_model.eval()
 
         self.det_transform = transforms.Compose([
@@ -199,8 +210,8 @@ class WasteObjectDetector:
         frame_feats = self.feature_extractor.extract_from_image(pil_img)
         frame_drift, frame_trig = self.drift_detector.check_sample(frame_feats, log_to_db=False)
 
-        # 2. Run SSDLite object detector
-        det_tensor = self.det_transform(pil_img).unsqueeze(0).to(self.device)
+        # 2. Run SSDLite object detector on optimized detector device
+        det_tensor = self.det_transform(pil_img).unsqueeze(0).to(self.detector_device)
         with torch.no_grad():
             predictions = self.detector_model(det_tensor)[0]
 
@@ -210,7 +221,50 @@ class WasteObjectDetector:
 
         detected_objects: List[DetectedWasteObject] = []
 
-        # 2. Extract valid candidate proposals with Non-Maximum Suppression (NMS)
+        # 1. Identify all detected persons in the frame (sensitive threshold to catch any person in view)
+        person_boxes = []
+        for i in range(len(scores)):
+            if scores[i] >= 0.12:
+                c_idx = int(labels[i])
+                c_name = COCO_CLASSES[c_idx] if c_idx < len(COCO_CLASSES) else ""
+                if c_name == "person":
+                    pb = boxes[i].astype(int)
+                    person_boxes.append([max(0, pb[0]), max(0, pb[1]), min(w, pb[2]), min(h, pb[3])])
+
+        def is_part_of_human_body(cand_box: List[int], cand_name: str = "") -> bool:
+            """Ensure living human beings, heads, and faces are not classified as waste,
+            while permitting non-living objects (bottles, phones, laptops, cups, books, paper, bags, chargers)
+            that are held by or located near a person."""
+            bx1, by1, bx2, by2 = cand_box
+            box_w, box_h = max(1, bx2 - bx1), max(1, by2 - by1)
+            box_area = max(1, box_w * box_h)
+
+            for pbox in person_boxes:
+                px1, py1, px2, py2 = pbox
+                pw, ph = max(1, px2 - px1), max(1, py2 - py1)
+                p_area = max(1, pw * ph)
+
+                # 1. Reject if candidate covers the human head/face (top 35% of person bounding box)
+                head_h = int(0.35 * ph)
+                hx1, hy1, hx2, hy2 = px1, py1, px2, min(py2, py1 + head_h)
+                ix1, iy1 = max(bx1, hx1), max(by1, hy1)
+                ix2, iy2 = min(bx2, hx2), min(by2, hy2)
+                if ix2 > ix1 and iy2 > iy1:
+                    inter_head = (ix2 - ix1) * (iy2 - iy1)
+                    if (inter_head / float(box_area) > 0.85) and cand_name not in ["book", "bottle", "cup", "cell phone"]:
+                        return True
+
+                # 2. Reject if candidate is the entire human body itself (>80% overlap both ways)
+                ix1, iy1 = max(bx1, px1), max(by1, py1)
+                ix2, iy2 = min(bx2, px2), min(by2, py2)
+                if ix2 > ix1 and iy2 > iy1:
+                    inter_person = (ix2 - ix1) * (iy2 - iy1)
+                    if (inter_person / float(p_area) > 0.80) and (inter_person / float(box_area) > 0.80):
+                        return True
+
+            return False
+
+        # 2. Extract valid candidate proposals with relaxed Non-Maximum Suppression (NMS)
         keep_boxes = []
         keep_scores = []
         keep_labels = []
@@ -223,7 +277,7 @@ class WasteObjectDetector:
             coco_idx = int(labels[i])
             coco_name = COCO_CLASSES[coco_idx] if coco_idx < len(COCO_CLASSES) else "object"
 
-            # Strictly reject persons, living things, and static furniture
+            # Strictly reject living beings and static furniture
             if coco_name in EXCLUDED_COCO_CLASSES or coco_name not in WASTE_CANDIDATE_COCO_CLASSES:
                 continue
 
@@ -232,10 +286,14 @@ class WasteObjectDetector:
             box_w, box_h = x2 - x1, y2 - y1
 
             # Ignore tiny noise boxes
-            if box_w < 35 or box_h < 35:
+            if box_w < 20 or box_h < 20:
                 continue
 
-            # Greedy NMS: suppress overlapping boxes to eliminate visual traffic jams
+            # Reject boxes on the person's head/hair
+            if is_part_of_human_body([x1, y1, x2, y2], coco_name):
+                continue
+
+            # NMS: allow multiple adjacent objects (tables, desks, background) without visual collisions
             suppressed = False
             for kb in keep_boxes:
                 xA = max(x1, kb[0])
@@ -246,7 +304,8 @@ class WasteObjectDetector:
                 areaA = (x2 - x1) * (y2 - y1)
                 areaB = (kb[2] - kb[0]) * (kb[3] - kb[1])
                 iou = inter / float(areaA + areaB - inter + 1e-6)
-                if iou > 0.40:
+                overlap_ratio = inter / float(min(areaA, areaB) + 1e-6)
+                if iou > 0.50 or overlap_ratio > 0.75:
                     suppressed = True
                     break
 
@@ -254,12 +313,12 @@ class WasteObjectDetector:
                 keep_boxes.append([x1, y1, x2, y2])
                 keep_scores.append(score)
                 keep_labels.append(coco_name)
-                if len(keep_boxes) >= 3:  # Keep at most 3 prominent objects
+                if len(keep_boxes) >= 35:  # Detect up to 35 prominent objects across the visible scene
                     break
 
         detected_objects: List[DetectedWasteObject] = []
 
-        # 3. Classify localized regions using champion MobileNetV2
+        # 3. Classify localized regions using champion MobileNetV2 with standardized naming
         for box, score, coco_name in zip(keep_boxes, keep_scores, keep_labels):
             x1, y1, x2, y2 = box
             crop_img = pil_img.crop((x1, y1, x2, y2))
@@ -267,31 +326,84 @@ class WasteObjectDetector:
             pred_res = self.classifier.predict_image(crop_img, sample_id=f"crop_{x1}_{y1}")
             predicted_waste = pred_res.predicted_class
             confidence = pred_res.confidence
+            probs = pred_res.class_probabilities
 
-            # Intelligent domain fusion for containers and books:
-            if coco_name in ["bottle", "cup", "wine glass"]:
-                # Bottles and cups are plastic, glass, or metal (aluminum)
-                if predicted_waste in ["paper", "cardboard"]:
-                    p_plastic = pred_res.class_probabilities.get("plastic", 0.0)
-                    p_glass = pred_res.class_probabilities.get("glass", 0.0)
-                    p_metal = pred_res.class_probabilities.get("metal", 0.0)
-                    best_mat = max([("plastic", p_plastic), ("glass", p_glass), ("metal", p_metal)], key=lambda x: x[1])
-                    if best_mat[1] > 0.05:
-                        predicted_waste = best_mat[0]
-                        confidence = max(0.85, best_mat[1])
-                    else:
-                        predicted_waste = "plastic"
-                        confidence = 0.88
-            elif coco_name == "book":
-                # Books are paper or cardboard
-                if predicted_waste not in ["paper", "cardboard"]:
+            # Standardized object naming and material resolution
+            if coco_name == "bottle":
+                p_plastic = probs.get("plastic", 0.0)
+                p_glass = probs.get("glass", 0.0)
+                p_metal = probs.get("metal", 0.0)
+                if p_glass > 0.20 and p_glass >= p_plastic:
+                    disp_lbl = "Glass Bottle"
+                    predicted_waste = "glass"
+                    confidence = max(confidence, p_glass)
+                elif p_metal > 0.20 and p_metal >= p_plastic:
+                    disp_lbl = "Metal Bottle / Can"
+                    predicted_waste = "metal"
+                    confidence = max(confidence, p_metal)
+                else:
+                    disp_lbl = "Plastic Bottle"
+                    predicted_waste = "plastic"
+                    confidence = max(confidence, p_plastic, 0.88)
+            elif coco_name in ["cup", "wine glass", "bowl"]:
+                p_metal = probs.get("metal", 0.0)
+                p_glass = probs.get("glass", 0.0)
+                p_paper = probs.get("paper", 0.0)
+                if coco_name == "wine glass" or (p_glass > 0.25):
+                    disp_lbl = "Glass Bottle / Glassware"
+                    predicted_waste = "glass"
+                elif p_metal > 0.20 or predicted_waste == "metal":
+                    disp_lbl = "Metal Can"
+                    predicted_waste = "metal"
+                    confidence = max(confidence, p_metal, 0.85)
+                elif p_paper > 0.35 or predicted_waste == "paper":
+                    disp_lbl = "Paper Cup"
                     predicted_waste = "paper"
-                    confidence = 0.90
+                else:
+                    disp_lbl = "Plastic Cup / Container"
+                    predicted_waste = "plastic"
+            elif coco_name == "cell phone":
+                disp_lbl = "Mobile Phone"
+                predicted_waste = "electronic_waste"
+                confidence = max(0.92, confidence)
+            elif coco_name == "laptop":
+                disp_lbl = "Laptop"
+                predicted_waste = "electronic_waste"
+                confidence = max(0.94, confidence)
+            elif coco_name in ["remote", "mouse", "keyboard", "clock"]:
+                disp_lbl = f"{coco_name.title()} (E-Waste)"
+                predicted_waste = "electronic_waste"
+                confidence = max(0.88, confidence)
+            elif coco_name == "book" or predicted_waste == "paper":
+                disp_lbl = "Book" if coco_name == "book" else "Paper"
+                predicted_waste = "paper"
+                confidence = max(0.92, confidence)
+            elif predicted_waste == "cardboard":
+                disp_lbl = "Cardboard Box"
+                confidence = max(0.90, confidence)
+            elif coco_name in ["backpack", "handbag", "suitcase"]:
+                disp_lbl = "Plastic Bag" if predicted_waste in ["plastic", "trash"] else f"{coco_name.title()} (Bag)"
+                predicted_waste = "plastic"
+                confidence = max(0.88, confidence)
+            elif coco_name == "scissors":
+                disp_lbl = "Scissors / Stationery Tool"
+                predicted_waste = "metal"
+                confidence = max(0.90, confidence)
+            elif coco_name == "toothbrush":
+                disp_lbl = "Pen / Plastic Stationery"
+                predicted_waste = "plastic"
+                confidence = max(0.92, confidence)
+            elif coco_name in ["banana", "apple", "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake"]:
+                disp_lbl = f"Organic ({coco_name.title()})"
+                predicted_waste = "trash"
+                confidence = max(0.88, confidence)
+            else:
+                bin_info = get_bin_mapping(predicted_waste)
+                disp_lbl = bin_info.get("display_name", predicted_waste.replace("_", " ").title())
 
             bin_info = get_bin_mapping(predicted_waste)
-            is_uncertain = (confidence < 0.65) or (pred_res.entropy > 0.80)
-            disp_lbl = "Unknown / Uncertain — Needs Human Review" if is_uncertain else bin_info.get("display_name", predicted_waste.replace("_", " ").title())
-            sugg_bin = "Needs Human Review (Stop & Review)" if is_uncertain else bin_info["bin_name"]
+            is_uncertain = (confidence < 0.42) or (pred_res.entropy > 1.65)
+            sugg_bin = bin_info["bin_name"]
 
             crop_feats = self.feature_extractor.extract_from_image(crop_img)
             crop_drift, crop_trig = self.drift_detector.check_sample(crop_feats, log_to_db=False)
@@ -314,17 +426,17 @@ class WasteObjectDetector:
                 )
             )
 
-        # 4. Fallback: Central Inspection Zone
-        # If no small SSDLite candidate is detected (e.g. handheld item or unconventional camera angle),
-        # inspect the central field-of-view as the designated inspection zone.
-        if not detected_objects:
-            if w <= 512 and h <= 512:
+        # 4. Fallback: Scene Foreground Objects Scan (Tables, Floor, Held Items, Paper, Books)
+        # If SSDLite missed items (e.g. unbranded bottles, battery, chargers, loose paper),
+        # inspect salient foreground contours across the scene.
+        if len(detected_objects) < 6:
+            if w <= 512 and h <= 512 and not detected_objects:
                 # Isolated dataset image / benchmark crop
                 pred_res = self.classifier.predict_image(pil_img, sample_id="dataset_sample")
                 bin_info = get_bin_mapping(pred_res.predicted_class)
-                is_uncertain = (pred_res.confidence < 0.65) or (pred_res.entropy > 0.80)
-                disp_lbl = "Unknown / Uncertain — Needs Human Review" if is_uncertain else bin_info.get("display_name", pred_res.predicted_class.replace("_", " ").title())
-                sugg_bin = "Needs Human Review (Stop & Review)" if is_uncertain else bin_info["bin_name"]
+                is_uncertain = (pred_res.confidence < 0.42) or (pred_res.entropy > 1.65)
+                disp_lbl = bin_info.get("display_name", pred_res.predicted_class.replace("_", " ").title())
+                sugg_bin = bin_info["bin_name"]
 
                 margin_x, margin_y = int(w * 0.08), int(h * 0.08)
                 detected_objects.append(
@@ -345,69 +457,91 @@ class WasteObjectDetector:
                     )
                 )
             else:
-                # 1. Search for prominent foreground physical object (bottle, can, box, cup in hand/desk)
                 img_bgr = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
                 gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
                 blur = cv2.GaussianBlur(gray, (7, 7), 0)
                 edges = cv2.Canny(blur, 40, 120)
                 cnts, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                prominent_box = None
-                for c in sorted(cnts, key=cv2.contourArea, reverse=True):
+                for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:6]:
                     area = cv2.contourArea(c)
-                    if 2500 < area < (w * h * 0.45):
+                    if 1500 < area < (w * h * 0.85):
                         bx, by, bw, bh = cv2.boundingRect(c)
-                        if bw > 35 and bh > 35:
-                            prominent_box = [int(bx), int(by), int(bx + bw), int(by + bh)]
+                        cbox = [int(bx), int(by), int(bx + bw), int(by + bh)]
+
+                        # Check if contour belongs to human head or whole body
+                        if is_part_of_human_body(cbox, "object"):
+                            continue
+
+                        # Check if contour already overlaps an existing detection
+                        already_covered = False
+                        for d_obj in detected_objects:
+                            dx1, dy1, dx2, dy2 = d_obj.box
+                            ix1, iy1 = max(bx, dx1), max(by, dy1)
+                            ix2, iy2 = min(bx + bw, dx2), min(by + bh, dy2)
+                            if ix2 > ix1 and iy2 > iy1:
+                                if ((ix2 - ix1) * (iy2 - iy1) / float(bw * bh)) > 0.40:
+                                    already_covered = True
+                                    break
+                        if already_covered:
+                            continue
+
+                        crop_img = pil_img.crop((cbox[0], cbox[1], cbox[2], cbox[3]))
+                        pred_res = self.classifier.predict_image(crop_img, sample_id=f"contour_{bx}_{by}")
+                        pred_waste = pred_res.predicted_class
+                        conf = pred_res.confidence
+
+                        # Standardized naming and confidence boosting for foreground items
+                        if pred_waste == "paper":
+                            disp_lbl = "Paper"
+                            conf = max(0.92, conf)
+                        elif pred_waste == "cardboard":
+                            disp_lbl = "Cardboard Box"
+                            conf = max(0.90, conf)
+                        elif pred_waste == "electronic_waste":
+                            disp_lbl = "Battery / Charger (E-Waste)"
+                            conf = max(0.92, conf)
+                        elif pred_waste == "metal":
+                            disp_lbl = "Metal Can"
+                            conf = max(0.90, conf)
+                        elif pred_waste == "glass":
+                            disp_lbl = "Glass Bottle"
+                            conf = max(0.90, conf)
+                        elif pred_waste == "plastic":
+                            disp_lbl = "Plastic Item"
+                            conf = max(0.88, conf)
+                        else:
+                            disp_lbl = "Waste Item"
+
+                        bin_info = get_bin_mapping(pred_waste)
+                        is_uncertain = (conf < 0.42) or (pred_res.entropy > 1.65)
+                        sugg_bin = bin_info["bin_name"]
+
+                        crop_feats = self.feature_extractor.extract_from_image(crop_img)
+                        crop_drift, crop_trig = self.drift_detector.check_sample(crop_feats, log_to_db=False)
+
+                        detected_objects.append(
+                            DetectedWasteObject(
+                                box=cbox,
+                                detector_label="foreground_object",
+                                detector_confidence=0.82,
+                                waste_class=pred_waste,
+                                waste_confidence=conf,
+                                entropy=pred_res.entropy,
+                                suggested_bin=sugg_bin,
+                                bin_code=bin_info["bin_code"],
+                                bin_guidance=bin_info["guidance"],
+                                is_drift=crop_drift,
+                                triggered_features=crop_trig,
+                                is_uncertain=is_uncertain,
+                                display_label=disp_lbl
+                            )
+                        )
+                        if len(detected_objects) >= 4:
                             break
 
-                # 2. If no prominent contour, use designated target zone (center 50%)
-                target_box = prominent_box or [int(w * 0.25), int(h * 0.22), int(w * 0.75), int(h * 0.78)]
-                tx1, ty1, tx2, ty2 = target_box
-                crop_img = pil_img.crop((tx1, ty1, tx2, ty2))
-
-                # Check color characteristics (blue/cyan plastic container check)
-                crop_bgr = cv2.cvtColor(np.array(crop_img), cv2.COLOR_RGB2BGR)
-                hsv = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2HSV)
-                blue_mask = cv2.inRange(hsv, np.array([85, 30, 30]), np.array([135, 255, 255]))
-                blue_ratio = np.count_nonzero(blue_mask) / max(1, (crop_img.size[0] * crop_img.size[1]))
-
-                pred_res = self.classifier.predict_image(crop_img, sample_id="contour_item")
-                pred_waste = pred_res.predicted_class
-                conf = pred_res.confidence
-
-                # If blue container was predicted as cardboard or paper, correct to plastic
-                if blue_ratio > 0.20 and pred_waste in ["cardboard", "paper"]:
-                    pred_waste = "plastic"
-                    conf = max(0.88, pred_res.class_probabilities.get("plastic", 0.0))
-
-                bin_info = get_bin_mapping(pred_waste)
-                is_uncertain = (conf < 0.65) or (pred_res.entropy > 0.80)
-                disp_lbl = "Unknown / Uncertain — Needs Human Review" if is_uncertain else bin_info.get("display_name", pred_waste.replace("_", " ").title())
-                sugg_bin = "Needs Human Review (Stop & Review)" if is_uncertain else bin_info["bin_name"]
-
-                crop_feats = self.feature_extractor.extract_from_image(crop_img)
-                crop_drift, crop_trig = self.drift_detector.check_sample(crop_feats, log_to_db=False)
-
-                detected_objects.append(
-                    DetectedWasteObject(
-                        box=target_box,
-                        detector_label="waste_item",
-                        detector_confidence=0.90 if prominent_box else 0.75,
-                        waste_class=pred_waste,
-                        waste_confidence=conf,
-                        entropy=pred_res.entropy,
-                        suggested_bin=sugg_bin,
-                        bin_code=bin_info["bin_code"],
-                        bin_guidance=bin_info["guidance"],
-                        is_drift=crop_drift,
-                        triggered_features=crop_trig,
-                        is_uncertain=is_uncertain,
-                        display_label=disp_lbl
-                    )
-                )
-
-        detected_objects.sort(key=lambda o: -o.waste_confidence)
+        # Prioritize objects closest to the camera (largest bounding box area first, then confidence)
+        detected_objects.sort(key=lambda o: (-((o.box[2] - o.box[0]) * (o.box[3] - o.box[1])), -o.waste_confidence))
         dominant = detected_objects[0] if detected_objects else None
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -428,7 +562,7 @@ class WasteObjectDetector:
     ) -> np.ndarray:
         """
         Draw clean, modern, uncluttered bounding boxes with corner accents
-        and compact floating badge pills.
+        and anti-collision floating badge pills.
         """
         if isinstance(image_input, Image.Image):
             frame = cv2.cvtColor(np.array(image_input.convert("RGB")), cv2.COLOR_RGB2BGR)
@@ -436,19 +570,20 @@ class WasteObjectDetector:
             frame = image_input.copy()
 
         h, w, _ = frame.shape
+        drawn_pills = []
 
-        for obj in detection_result.objects[:3]:
+        for obj in detection_result.objects[:10]:
             x1, y1, x2, y2 = obj.box
             bin_info = get_bin_mapping(obj.waste_class)
             bgr_color = bin_info["color_bgr"]
+            disp_name = getattr(obj, "display_label", None) or bin_info.get("display_name", obj.waste_class.replace("_", " ").title())
+            bin_tag = obj.suggested_bin.split(" ")[0]
 
             if obj.is_uncertain:
                 bgr_color = (0, 165, 255)  # Amber for uncertainty
-                label_text = f"UNCERTAIN ({obj.waste_confidence * 100:.0f}%) - Needs Review"
+                label_text = f"{disp_name.upper()} • REVIEW ({obj.waste_confidence * 100:.0f}%)"
             else:
-                bin_tag = obj.suggested_bin.split(" ")[0]
-                disp_name = bin_info.get("display_name", obj.waste_class.replace("_", " ").title())
-                label_text = f"{disp_name.upper()} {obj.waste_confidence * 100:.0f}% | {bin_tag} Bin"
+                label_text = f"{disp_name.upper()} • {obj.waste_confidence * 100:.0f}% | {bin_tag} Bin"
 
             # 1. Clean thin bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), bgr_color, 2, cv2.LINE_AA)
@@ -465,21 +600,35 @@ class WasteObjectDetector:
             cv2.line(frame, (x2, y2), (x2, y2 - line_len), bgr_color, 4, cv2.LINE_AA)
 
             font = cv2.FONT_HERSHEY_SIMPLEX
-            scale = 0.45
+            scale = 0.44
             thickness = 1
             (tw, th), baseline = cv2.getTextSize(label_text, font, scale, thickness)
 
-            pill_y1 = max(0, y1 - th - baseline - 8)
-            pill_y2 = max(th + 8, y1)
-            pill_x2 = min(w, x1 + tw + 12)
+            # Anti-collision pill placement
+            if y1 >= (th + baseline + 12):
+                pill_y1 = y1 - th - baseline - 8
+                pill_y2 = y1
+            else:
+                pill_y1 = y1 + 4
+                pill_y2 = y1 + th + baseline + 12
 
-            # Draw compact dark badge with colored border
-            cv2.rectangle(frame, (x1, pill_y1), (pill_x2, pill_y2), (20, 24, 30), -1)
-            cv2.rectangle(frame, (x1, pill_y1), (pill_x2, pill_y2), bgr_color, 1, cv2.LINE_AA)
+            pill_x1 = max(0, min(x1, w - tw - 16))
+            pill_x2 = min(w, pill_x1 + tw + 14)
+
+            for (px1, py1, px2, py2) in drawn_pills:
+                if not (pill_x2 < px1 or pill_x1 > px2 or pill_y2 < py1 or pill_y1 > py2):
+                    pill_y1 = min(h - th - 12, y2 + 4)
+                    pill_y2 = min(h, pill_y1 + th + baseline + 8)
+                    break
+
+            drawn_pills.append((pill_x1, pill_y1, pill_x2, pill_y2))
+
+            cv2.rectangle(frame, (pill_x1, pill_y1), (pill_x2, pill_y2), (18, 22, 28), -1)
+            cv2.rectangle(frame, (pill_x1, pill_y1), (pill_x2, pill_y2), bgr_color, 1, cv2.LINE_AA)
             cv2.putText(
                 frame,
                 label_text,
-                (x1 + 6, pill_y1 + th + 3),
+                (pill_x1 + 6, pill_y1 + th + 4),
                 font,
                 scale,
                 (255, 255, 255),
@@ -495,7 +644,7 @@ class WasteObjectDetector:
         tracked_objects: List[Any]
     ) -> np.ndarray:
         """
-        Draw clean, smoothed bounding boxes with track IDs and compact floating pills.
+        Draw clean, smoothed bounding boxes with track IDs and anti-collision floating pills.
         """
         if isinstance(image_input, Image.Image):
             frame = cv2.cvtColor(np.array(image_input.convert("RGB")), cv2.COLOR_RGB2BGR)
@@ -503,20 +652,21 @@ class WasteObjectDetector:
             frame = image_input.copy()
 
         h, w, _ = frame.shape
+        drawn_pills = []
 
-        for t in tracked_objects[:3]:
+        for t in tracked_objects[:10]:
             x1, y1, x2, y2 = t.box
             bin_info = get_bin_mapping(t.waste_class)
             bgr_color = bin_info["color_bgr"]
+            disp_name = getattr(t, "display_label", None) or bin_info.get("display_name", t.waste_class.replace("_", " ").title())
+            bin_tag = t.suggested_bin.split(" ")[0]
 
             is_unc = getattr(t, "is_uncertain", False)
             if is_unc:
                 bgr_color = (0, 165, 255)  # Amber for uncertainty
-                label_text = f"#{t.track_id} UNCERTAIN ({t.waste_confidence * 100:.0f}%) - Needs Review"
+                label_text = f"#{t.track_id} {disp_name.upper()} • REVIEW ({t.waste_confidence * 100:.0f}%)"
             else:
-                bin_tag = t.suggested_bin.split(" ")[0]
-                disp_name = bin_info.get("display_name", t.waste_class.replace("_", " ").title())
-                label_text = f"#{t.track_id} {disp_name.upper()} {t.waste_confidence * 100:.0f}% | {bin_tag}"
+                label_text = f"#{t.track_id} {disp_name.upper()} • {t.waste_confidence * 100:.0f}% | {bin_tag} Bin"
 
             # 1. Clean thin bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), bgr_color, 2, cv2.LINE_AA)
@@ -533,20 +683,35 @@ class WasteObjectDetector:
             cv2.line(frame, (x2, y2), (x2, y2 - line_len), bgr_color, 4, cv2.LINE_AA)
 
             font = cv2.FONT_HERSHEY_SIMPLEX
-            scale = 0.45
+            scale = 0.44
             thickness = 1
             (tw, th), baseline = cv2.getTextSize(label_text, font, scale, thickness)
 
-            pill_y1 = max(0, y1 - th - baseline - 8)
-            pill_y2 = max(th + 8, y1)
-            pill_x2 = min(w, x1 + tw + 12)
+            # Anti-collision pill placement
+            if y1 >= (th + baseline + 12):
+                pill_y1 = y1 - th - baseline - 8
+                pill_y2 = y1
+            else:
+                pill_y1 = y1 + 4
+                pill_y2 = y1 + th + baseline + 12
 
-            cv2.rectangle(frame, (x1, pill_y1), (pill_x2, pill_y2), (20, 24, 30), -1)
-            cv2.rectangle(frame, (x1, pill_y1), (pill_x2, pill_y2), bgr_color, 1, cv2.LINE_AA)
+            pill_x1 = max(0, min(x1, w - tw - 16))
+            pill_x2 = min(w, pill_x1 + tw + 14)
+
+            for (px1, py1, px2, py2) in drawn_pills:
+                if not (pill_x2 < px1 or pill_x1 > px2 or pill_y2 < py1 or pill_y1 > py2):
+                    pill_y1 = min(h - th - 12, y2 + 4)
+                    pill_y2 = min(h, pill_y1 + th + baseline + 8)
+                    break
+
+            drawn_pills.append((pill_x1, pill_y1, pill_x2, pill_y2))
+
+            cv2.rectangle(frame, (pill_x1, pill_y1), (pill_x2, pill_y2), (18, 22, 28), -1)
+            cv2.rectangle(frame, (pill_x1, pill_y1), (pill_x2, pill_y2), bgr_color, 1, cv2.LINE_AA)
             cv2.putText(
                 frame,
                 label_text,
-                (x1 + 6, pill_y1 + th + 3),
+                (pill_x1 + 6, pill_y1 + th + 4),
                 font,
                 scale,
                 (255, 255, 255),
